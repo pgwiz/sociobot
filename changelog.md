@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-09-29
+
+### Fixed & Enhanced
+- **Channel Onboarding & Auto-Link Resilience:**
+  - Configured `allowed_updates=["message", "callback_query", "my_chat_member", "chat_member"]` in polling loop and set `drop_pending_updates=False` so channel promotion events are not discarded on bot startup.
+  - Bot now sends a confirmation message directly into the connected channel with a 1-tap `[ 🎧 Open Sociobot in PM ]` button, providing instant visual feedback even if the user hasn't messaged the bot in PM yet.
+  - Added forwarded channel post auto-linking: forwarding any post from a private channel or group into Sociobot's private chat automatically verifies and links the vault.
+  - Enhanced `/setchannel` to support raw channel IDs, `@usernames`, and `https://t.me/...` links.
+  - Added pre-authorized admin permission query parameters (`admin=post_messages+edit_messages+delete_messages`) to the "Add Bot to Channel" button for 1-tap permission assignment.
+  - Extended support to groups and supergroups.
+
 ## [1.2.0] - 2026-09-29
 
 ### Added

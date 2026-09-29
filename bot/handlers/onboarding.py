@@ -8,7 +8,13 @@ Handles:
 
 import logging
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, ChatMemberUpdated
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatMemberStatus, ChatType
 from bot.config import settings
@@ -24,20 +30,26 @@ router = Router(name="onboarding")
 
 @router.my_chat_member()
 async def on_channel_admin_update(event: ChatMemberUpdated, bot: Bot):
-    """Auto-detect when the bot is promoted to administrator in a channel."""
+    """Auto-detect when the bot is promoted to administrator in a channel or group."""
     chat = event.chat
     new_status = event.new_chat_member.status
     old_status = event.old_chat_member.status
     from_user = event.from_user
 
-    logger.info(f"Bot chat member update in {chat.id} ({chat.type}): {old_status} -> {new_status} by user {from_user.id}")
+    logger.info(
+        f"Bot chat member update in {chat.id} ({chat.type}): {old_status} -> {new_status} "
+        f"by user {from_user.id if from_user else 'None'}"
+    )
 
-    # Check if promoted to administrator in a channel or supergroup
-    if chat.type in (ChatType.CHANNEL, ChatType.SUPERGROUP) and new_status == ChatMemberStatus.ADMINISTRATOR:
-        channel_id = chat.id
-        channel_title = chat.title or "Private Storage Channel"
-        user_id = from_user.id
+    if not from_user or from_user.is_bot:
+        return
 
+    user_id = from_user.id
+    channel_id = chat.id
+    channel_title = chat.title or "Private Storage Channel"
+
+    # Check if promoted to administrator in a channel, supergroup, or group
+    if chat.type in (ChatType.CHANNEL, ChatType.SUPERGROUP, ChatType.GROUP) and new_status == ChatMemberStatus.ADMINISTRATOR:
         # Register or update user record and link channel
         await db.get_or_create_user(
             chat_id=user_id,
@@ -46,10 +58,33 @@ async def on_channel_admin_update(event: ChatMemberUpdated, bot: Bot):
             is_admin=(user_id == settings.ADMIN_CHAT_ID)
         )
         await db.link_user_channel(user_id, channel_id, channel_title)
+        logger.info(f"Successfully linked {chat.type} {channel_id} ('{channel_title}') to user {user_id}")
 
-        logger.info(f"Successfully linked channel {channel_id} ('{channel_title}') to user {user_id}")
+        bot_info = await bot.get_me()
 
-        # Send polite onboarding confirmation to the user in their PM
+        # 1. Post confirmation message directly in the channel so user gets immediate visual feedback!
+        channel_post_text = (
+            f"🎉 <b>Sociobot Storage Vault Connected!</b>\n\n"
+            f"✅ This channel is now linked to <b>{from_user.first_name}</b> (<code>{user_id}</code>).\n\n"
+            f"🎵 All music & videos downloaded will be automatically archived in this vault with instant delete control."
+        )
+        try:
+            channel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="🎧 Open Sociobot in PM",
+                    url=f"https://t.me/{bot_info.username}?start=vault_linked"
+                )]
+            ])
+            await bot.send_message(
+                chat_id=channel_id,
+                text=channel_post_text,
+                parse_mode="HTML",
+                reply_markup=channel_kb
+            )
+        except Exception as e:
+            logger.warning(f"Could not post confirmation to channel {channel_id}: {e}")
+
+        # 2. Also send polite onboarding confirmation to the user in their PM
         polite_text = (
             f"🎉 <b>Storage Channel Linked!</b>\n\n"
             f"Connected: <b>{channel_title}</b> (<code>{channel_id}</code>)\n\n"
@@ -64,10 +99,26 @@ async def on_channel_admin_update(event: ChatMemberUpdated, bot: Bot):
                 reply_markup=get_onboarding_keyboard()
             )
         except Exception as e:
-            logger.warning(f"Could not send channel link confirmation PM to {user_id}: {e}")
+            logger.info(f"User {user_id} hasn't started bot in PM yet: {e}")
+
+    # Check if bot was added as ordinary member in a group, guide user to promote it
+    elif chat.type in (ChatType.SUPERGROUP, ChatType.GROUP) and new_status == ChatMemberStatus.MEMBER:
+        bot_info = await bot.get_me()
+        try:
+            await bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    f"👋 <b>Thanks for adding Sociobot!</b>\n\n"
+                    f"To use this group as your storage vault, please promote me to <b>Administrator</b> "
+                    f"with <i>Post Messages</i> and <i>Delete Messages</i> permissions."
+                ),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
     # Check if bot was kicked or demoted
-    elif new_status in (ChatMemberStatus.KICKED, ChatMemberStatus.LEFT, ChatMemberStatus.MEMBER):
+    elif new_status in (ChatMemberStatus.KICKED, ChatMemberStatus.LEFT):
         logger.info(f"Bot access removed from channel {chat.id}")
         # Note: Any user mapped to this channel will be prompted on next request
 
@@ -140,51 +191,197 @@ async def cmd_mychannel(message: Message, bot: Bot):
         await message.answer(text, parse_mode="HTML", reply_markup=get_channel_setup_keyboard(bot_info.username))
 
 
+# ── Forwarded Channel Message Auto-Link ─────────────────────────────────
+
+@router.message(F.forward_origin | F.forward_from_chat)
+async def on_forwarded_channel_message(message: Message, bot: Bot):
+    """Auto-link storage channel when user forwards any post from their channel to the bot in PM."""
+    if message.chat.type != ChatType.PRIVATE:
+        return
+
+    user_id = message.from_user.id
+    target_chat = None
+
+    # Check modern Telegram Bot API forward_origin (aiogram 3.4+)
+    if message.forward_origin:
+        origin = message.forward_origin
+        if getattr(origin, "type", None) == "channel" and hasattr(origin, "chat"):
+            target_chat = origin.chat
+        elif hasattr(origin, "chat") and getattr(origin.chat, "type", None) in (ChatType.CHANNEL, ChatType.SUPERGROUP, ChatType.GROUP):
+            target_chat = origin.chat
+
+    # Fallback to legacy forward_from_chat
+    if not target_chat and message.forward_from_chat:
+        target_chat = message.forward_from_chat
+
+    if not target_chat:
+        # Forwarded from a private user profile, ignore
+        return
+
+    bot_info = await bot.get_me()
+    channel_id = target_chat.id
+    channel_title = target_chat.title or "Private Storage Channel"
+
+    try:
+        member = await bot.get_chat_member(channel_id, bot_info.id)
+        if member.status != ChatMemberStatus.ADMINISTRATOR:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="➕ Add Bot as Admin",
+                    url=f"https://t.me/{bot_info.username}?startchannel=sociobot&admin=post_messages+edit_messages+delete_messages"
+                )]
+            ])
+            await message.answer(
+                f"⚠️ I detected your channel <b>{channel_title}</b> (<code>{channel_id}</code>), "
+                f"but I am not an <b>Administrator</b> in it yet!\n\n"
+                f"Please grant me admin rights with <i>Post Messages</i> permissions, then forward a message again.",
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            return
+
+        # Bot is confirmed administrator in this channel
+        await db.get_or_create_user(
+            chat_id=user_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            is_admin=(user_id == settings.ADMIN_CHAT_ID)
+        )
+        await db.link_user_channel(user_id, channel_id, channel_title)
+
+        await message.answer(
+            f"🎉 <b>Storage Vault Connected!</b>\n\n"
+            f"Connected: <b>{channel_title}</b> (<code>{channel_id}</code>)\n\n"
+            f"✅ All music & videos you download will be automatically archived here with instant delete control.",
+            parse_mode="HTML",
+            reply_markup=get_onboarding_keyboard()
+        )
+    except Exception as e:
+        logger.warning(f"Could not verify channel {channel_id} from forwarded message: {e}")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="➕ Add Bot as Admin",
+                url=f"https://t.me/{bot_info.username}?startchannel=sociobot&admin=post_messages+edit_messages+delete_messages"
+            )]
+        ])
+        await message.answer(
+            f"⚠️ Detected channel <b>{channel_title}</b> (<code>{channel_id}</code>), but I cannot access it yet.\n\n"
+            f"Make sure the bot has been added as an <b>Administrator</b> with post permissions first!",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+
+
+# ── Manual Channel Setup Command ────────────────────────────────────────
+
 @router.message(Command("setchannel"))
 async def cmd_setchannel(message: Message, bot: Bot):
-    """Manual fallback to link channel by ID or username."""
+    """Manual fallback to link channel by ID, @username, or t.me link."""
     user_id = message.from_user.id
     args = message.text.strip().split(maxsplit=1)
 
     target_id_str = None
     if len(args) > 1:
         target_id_str = args[1].strip()
+    elif message.forward_origin and getattr(message.forward_origin, "chat", None):
+        target_id_str = str(message.forward_origin.chat.id)
     elif message.forward_from_chat:
         target_id_str = str(message.forward_from_chat.id)
+    elif message.reply_to_message:
+        reply = message.reply_to_message
+        if reply.forward_origin and getattr(reply.forward_origin, "chat", None):
+            target_id_str = str(reply.forward_origin.chat.id)
+        elif reply.forward_from_chat:
+            target_id_str = str(reply.forward_from_chat.id)
 
     if not target_id_str:
+        bot_info = await bot.get_me()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="➕ Add Bot to Your Channel",
+                url=f"https://t.me/{bot_info.username}?startchannel=sociobot&admin=post_messages+edit_messages+delete_messages"
+            )],
+            [InlineKeyboardButton(
+                text="👥 Add Bot to a Group",
+                url=f"https://t.me/{bot_info.username}?startgroup=sociobot&admin=post_messages+delete_messages"
+            )]
+        ])
         await message.answer(
-            "📌 <b>How to link manually:</b>\n"
-            "Run <code>/setchannel -100xxxxxxxxxx</code> (channel ID)\n"
-            "or forward any message from your channel to this chat!",
-            parse_mode="HTML"
+            "📌 <b>How to link your storage channel:</b>\n\n"
+            "<b>Option 1 (Easiest):</b> Tap the button below to add the bot to your channel with admin rights.\n\n"
+            "<b>Option 2:</b> Forward any post from your channel directly to this chat!\n\n"
+            "<b>Option 3:</b> Type <code>/setchannel -100xxxxxxxxxx</code> (or <code>/setchannel @yourchannel</code>)",
+            parse_mode="HTML",
+            reply_markup=kb
         )
         return
 
+    # Clean input: handle links, @usernames, and raw IDs
+    clean_target = (
+        target_id_str.replace("https://t.me/", "")
+        .replace("http://t.me/", "")
+        .replace("t.me/", "")
+        .strip()
+    )
+    if clean_target.startswith("@"):
+        lookup_target = clean_target
+    elif clean_target.startswith("-100") or clean_target.startswith("-"):
+        try:
+            lookup_target = int(clean_target)
+        except ValueError:
+            lookup_target = clean_target
+    elif clean_target.isdigit():
+        lookup_target = int(f"-100{clean_target}")
+    else:
+        lookup_target = f"@{clean_target}"
+
     try:
-        target_id = int(target_id_str)
-        chat = await bot.get_chat(target_id)
-        member = await bot.get_chat_member(target_id, (await bot.get_me()).id)
+        bot_info = await bot.get_me()
+        chat = await bot.get_chat(lookup_target)
+        member = await bot.get_chat_member(chat.id, bot_info.id)
 
         if member.status != ChatMemberStatus.ADMINISTRATOR:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="➕ Promote Bot to Admin",
+                    url=f"https://t.me/{bot_info.username}?startchannel=sociobot&admin=post_messages+edit_messages+delete_messages"
+                )]
+            ])
             await message.answer(
-                f"⚠️ Bot is in <b>{chat.title}</b>, but is not an administrator. Please grant post permissions.",
-                parse_mode="HTML"
+                f"⚠️ Bot is in <b>{chat.title}</b>, but is not an <b>Administrator</b>. Please grant post permissions.",
+                parse_mode="HTML",
+                reply_markup=kb
             )
             return
 
-        channel_title = chat.title or "Private Channel"
-        await db.link_user_channel(user_id, target_id, channel_title)
+        channel_title = chat.title or "Private Storage Channel"
+        await db.get_or_create_user(
+            chat_id=user_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            is_admin=(user_id == settings.ADMIN_CHAT_ID)
+        )
+        await db.link_user_channel(user_id, chat.id, channel_title)
         await message.answer(
-            f"✅ Successfully linked to <b>{channel_title}</b> (<code>{target_id}</code>)!\n\n"
+            f"✅ Successfully linked to <b>{channel_title}</b> (<code>{chat.id}</code>)!\n\n"
             f"You are all set to search and download music.",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_onboarding_keyboard()
         )
     except Exception as e:
-        logger.warning(f"Failed to manually set channel for {user_id}: {e}")
+        logger.warning(f"Failed to manually set channel '{target_id_str}' for {user_id}: {e}")
+        bot_info = await bot.get_me()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="➕ Add Bot to Channel",
+                url=f"https://t.me/{bot_info.username}?startchannel=sociobot&admin=post_messages+edit_messages+delete_messages"
+            )]
+        ])
         await message.answer(
-            f"❌ Could not access channel <code>{target_id_str}</code>. Make sure the bot is already added as admin.",
-            parse_mode="HTML"
+            f"❌ Could not access channel <code>{target_id_str}</code>.\n\n"
+            f"Make sure the bot has already been added as an <b>Administrator</b> with post permissions.",
+            parse_mode="HTML",
+            reply_markup=kb
         )
 
 

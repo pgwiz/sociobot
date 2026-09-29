@@ -38,12 +38,14 @@
 
 ## Decentralized Storage & Multi-Node Schema
 1. **Channel Onboarding Flow:**
-   - Auto-detection: Intercepts `ChatMemberUpdated` when the bot is promoted to administrator in a user's private channel.
+   - Auto-detection: Intercepts `my_chat_member` (`ChatMemberUpdated`) with `allowed_updates` when the bot is promoted to administrator in a user's channel, supergroup, or group.
    - Saves channel ID and title to `users` table.
-   - Sends polite onboarding notice:
+   - Posts confirmation message directly in the channel with a 1-tap `[ 🎧 Open Sociobot in PM ]` deep-link button.
+   - Also sends polite onboarding notice in user's PM if already started:
      > *"✅ Channel linked! Your media is safely archived here for your full control. To keep downloads lightning-fast, audio may also be shared anonymously across the community network."*
      with a `[ Let's Go 🚀 ]` confirmation button.
-   - Manual fallback: `/setchannel <channel_id>` and `/mychannel`.
+   - Forwarding fallback: Forwarding ANY post from a channel to the bot in PM automatically verifies and links the vault.
+   - Manual fallback: `/setchannel <channel_id|@username|link>` and `/mychannel`.
 
 2. **Multi-Node Database Tables:**
    - `users`: User metadata, connected `channel_id`, `channel_title`, `is_storage_active`, `terms_accepted`, and admin status.

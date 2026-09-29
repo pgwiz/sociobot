@@ -68,8 +68,13 @@ async def lifespan(app: FastAPI):
 
     # 4. Launch polling as background task inside event loop
     logger.info("Starting Telegram bot polling loop...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    polling_task = asyncio.create_task(dp.start_polling(bot))
+    await bot.delete_webhook(drop_pending_updates=False)
+    polling_task = asyncio.create_task(
+        dp.start_polling(
+            bot,
+            allowed_updates=["message", "callback_query", "my_chat_member", "chat_member"]
+        )
+    )
 
     yield
 

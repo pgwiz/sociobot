@@ -28,13 +28,19 @@ def get_onboarding_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_channel_setup_keyboard(bot_username: Optional[str] = None) -> InlineKeyboardMarkup:
-    """Keyboard to prompt adding the bot to a private channel."""
+    """Keyboard to prompt adding the bot to a private channel or group."""
     rows = []
     if bot_username:
         rows.append([
             InlineKeyboardButton(
                 text="➕ Add Bot to Your Channel",
-                url=f"https://t.me/{bot_username}?startchannel=true"
+                url=f"https://t.me/{bot_username}?startchannel=sociobot&admin=post_messages+edit_messages+delete_messages"
+            )
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                text="👥 Add Bot to a Group / Supergroup",
+                url=f"https://t.me/{bot_username}?startgroup=sociobot&admin=post_messages+delete_messages"
             )
         ])
     rows.append([
