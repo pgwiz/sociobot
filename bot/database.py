@@ -38,6 +38,7 @@ class Database:
         self.sqlite_conn: Optional[aiosqlite.Connection] = None
         self._keepalive_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+        self._is_shutting_down = False
 
     @property
     def schema(self) -> str:
@@ -67,24 +68,9 @@ class Database:
                 max_retries = 5
                 base_delay = 1.5
                 schema = self.schema
+                self._is_shutting_down = False
 
-                # 1. Ensure schema exists on database
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        direct_conn = await asyncpg.connect(db_url, timeout=30.0, statement_cache_size=0)
-                        try:
-                            await direct_conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}";')
-                        finally:
-                            await direct_conn.close()
-                        break
-                    except NEON_TRANSIENT_ERRORS as e:
-                        logger.warning(f"Neon cold-start delay during schema check (attempt {attempt}): {e}")
-                        if attempt < max_retries:
-                            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-                        else:
-                            raise
-
-                # 2. Pool setup hook enforces search_path on every checkout across resets
+                # Pool setup hook enforces search_path on every checkout across resets
                 async def _setup_connection(conn):
                     await conn.execute(f'SET search_path TO "{schema}", public;')
 
@@ -95,15 +81,17 @@ class Database:
                             dsn=db_url,
                             min_size=settings.DB_POOL_MIN_SIZE,
                             max_size=settings.DB_POOL_MAX_SIZE,
-                            timeout=30.0,
-                            command_timeout=30.0,
+                            timeout=25.0,
+                            command_timeout=25.0,
                             statement_cache_size=0,  # Required for PgBouncer / Neon connection pooling
                             max_inactive_connection_lifetime=300.0,
                             setup=_setup_connection,
                             server_settings={"search_path": f"{schema},public"}
                         )
 
+                        # Test connectivity and pre-create custom schema
                         async with self.pg_pool.acquire() as conn:
+                            await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}";')
                             await conn.fetchval("SELECT 1;")
 
                         logger.info(f"Neon PostgreSQL connected and active (schema: '{schema}').")
@@ -114,7 +102,10 @@ class Database:
                         return
 
                     except NEON_TRANSIENT_ERRORS as e:
-                        logger.warning(f"Neon cold-start delay on attempt {attempt}: {e}")
+                        err_str = str(e).strip() or repr(e)
+                        logger.warning(
+                            f"Neon cold-start delay on attempt {attempt}/{max_retries}: {type(e).__name__}: {err_str}"
+                        )
                         if attempt < max_retries:
                             sleep_time = base_delay * (2 ** (attempt - 1))
                             logger.info(f"Waiting {sleep_time:.1f}s for Neon compute to spin up...")
@@ -143,6 +134,7 @@ class Database:
 
     async def disconnect(self) -> None:
         """Gracefully release database resources."""
+        self._is_shutting_down = True
         if self._keepalive_task and not self._keepalive_task.done():
             self._keepalive_task.cancel()
             try:
@@ -152,7 +144,11 @@ class Database:
             self._keepalive_task = None
 
         if self.pg_pool:
-            await self.pg_pool.close()
+            try:
+                # Fast graceful pool closure (up to 3.0s, then terminate)
+                await asyncio.wait_for(self.pg_pool.close(), timeout=3.0)
+            except (asyncio.TimeoutError, Exception):
+                self.pg_pool.terminate()
             self.pg_pool = None
             logger.info("Neon PostgreSQL pool closed.")
 
@@ -163,10 +159,10 @@ class Database:
 
     async def _keepalive_loop(self) -> None:
         """Lightweight background heartbeat every 4m to prevent Neon cold start during active use."""
-        while True:
+        while not self._is_shutting_down:
             try:
                 await asyncio.sleep(240)
-                if self.pg_pool:
+                if self.pg_pool and not self._is_shutting_down:
                     async with self.pg_pool.acquire() as conn:
                         await conn.fetchval("SELECT 1;")
             except asyncio.CancelledError:
@@ -176,16 +172,26 @@ class Database:
 
     async def _execute_pg_with_retry(self, callback, retries: int = 3):
         """Execute a PostgreSQL query with automatic retry on transient disconnect."""
+        if self._is_shutting_down or not self.pg_pool:
+            raise RuntimeError("Database connection pool is shutting down or closed.")
+
         for attempt in range(1, retries + 1):
+            if self._is_shutting_down:
+                raise RuntimeError("Database connection pool is shutting down.")
             try:
                 async with self.pg_pool.acquire() as conn:
                     return await callback(conn)
             except NEON_TRANSIENT_ERRORS as e:
-                logger.warning(f"Transient DB error during query (attempt {attempt}): {e}")
+                err_repr = str(e).strip() or repr(e)
+                logger.warning(
+                    f"Transient DB error during query (attempt {attempt}/{retries}): {type(e).__name__}: {err_repr}"
+                )
+                if self._is_shutting_down:
+                    raise
                 if attempt < retries:
                     if self.pg_pool:
                         try:
-                            await self.pg_pool.close()
+                            self.pg_pool.terminate()
                         except Exception:
                             pass
                         self.pg_pool = None

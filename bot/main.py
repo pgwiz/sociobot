@@ -80,6 +80,10 @@ async def lifespan(app: FastAPI):
 
     # 5. Graceful Shutdown
     logger.info("Shutting down background tasks and connection pools...")
+    try:
+        await dp.stop_polling()
+    except Exception:
+        pass
     polling_task.cancel()
     try:
         await polling_task

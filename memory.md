@@ -24,17 +24,18 @@
    - Driver: `asyncpg` with connection pooling.
    - Scale-to-Zero & Cold-Start Handling:
      - PgBouncer compatibility: `statement_cache_size=0` on `create_pool` to avoid prepared statement conflicts on Neon `-pooler` endpoints.
-     - Direct connection pre-creation: Executes `CREATE SCHEMA IF NOT EXISTS "<schema>"` before pool initialization, waking up compute if sleeping.
      - Pool Checkout Setup Hook: `asyncpg.create_pool(..., setup=_setup_connection)` executes `SET search_path TO "<schema>", public;` on every connection checkout, ensuring session state persists across PgBouncer transaction-mode connection recycling and `RESET ALL`.
      - Cold-start wakeup backoff: 5 retries with exponential backoff (1.5s, 3s, 6s, 12s, 24s).
      - Query-level retry: `_execute_pg_with_retry` automatically catches `ConnectionResetError`, `CannotConnectNowError`, or `ConnectionDoesNotExistError`, re-establishes the pool, and re-executes.
      - Keep-alive ping loop: Background task executes `SELECT 1;` every 240 seconds when `ENABLE_NEON_KEEPALIVE=true`.
+     - Graceful Shutdown Latch: `self._is_shutting_down` latch prevents keepalive pings or closing queries from touching a closing pool; pool disconnect is bounded with a 3.0s timeout falling back to `terminate()`.
    - SQLite Fallback: Activated when `DATABASE_URL` is unconfigured or starts with `sqlite:///`, using `aiosqlite` with WAL mode.
 
 3. **Render Deployment & WSGI Compatibility:**
    - Entrypoints: `wsgi.py` and `your_application/wsgi.py` wrap the FastAPI app in `a2wsgi.ASGIMiddleware(app)`.
    - Runs cleanly under Render's default command: `gunicorn your_application.wsgi` or standard `uvicorn bot.main:app`.
    - Aiogram polling runs as a background task within FastAPI lifespan with `/` and `/health` HTTP endpoints responding for Render health checks.
+   - Lifecycle: Lifespan manager triggers `dp.stop_polling()` followed by bot session, API client, and DB pool termination for 100% clean shutdown on container restarts without orphaned connections or unclosed session warnings.
 
 ## Decentralized Storage & Multi-Node Schema
 1. **Channel Onboarding Flow:**

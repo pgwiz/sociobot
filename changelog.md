@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-09-29
+
+### Fixed & Enhanced
+- **Graceful Shutdown & Pool Lifecycle Cleanup:**
+  - Resolved transient DB error warnings on application exit by introducing `_is_shutting_down` latch in `Database` connection pool.
+  - Eliminated shutdown race where keepalive pings or closing queries attempted to acquire connections on a terminating pool.
+  - Added bounded 3.0s graceful pool shutdown (`asyncio.wait_for`) with immediate `terminate()` fallback, ensuring instantaneous process termination on signals.
+  - Integrated `dp.stop_polling()` prior to task cancellation and bot session closure, eliminating unclosed client session warnings and `TelegramNetworkError` disconnect alerts on restart or container redeploy.
+  - Streamlined startup by moving schema verification directly into connection checkout, reducing cold-start round trips.
+
 ## [1.2.1] - 2026-09-29
 
 ### Fixed & Enhanced
