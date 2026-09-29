@@ -37,8 +37,8 @@ Instead of relying on a centralized bot-owned dump channel, users link their own
    - Genuine MP4 streaming video (`720p HD`).
    - Local `yt-dlp` emergency fallback.
 
-6. **Dual Database Engine:**
-   - **Neon Serverless PostgreSQL (Primary):** Connection pooling with PgBouncer compatibility (`statement_cache_size=0`), cold-start exponential backoff, automatic query reconnection, and optional keepalive ping loop.
+6. **Dual Database Engine & Schema Isolation:**
+   - **Neon Serverless PostgreSQL (Primary):** Isolated custom schema (`DB_SCHEMA=sociobot`) preventing any collision with other bots sharing the same database. Connection pooling with PgBouncer compatibility (`statement_cache_size=0`), cold-start exponential backoff, automatic query reconnection, and optional keepalive ping loop.
    - **SQLite (Local Fallback):** Asynchronous `aiosqlite` with WAL mode enabled.
 
 7. **Production Ready & Cloud Deployable:**
@@ -104,6 +104,7 @@ Add the following in the Render **Environment** dashboard:
 | `SUPER_ADMIN_IDS` | Your Telegram User ID *(Required for Super Admin)* | `69594164` |
 | `ADMIN_CHAT_ID` | Primary admin Telegram ID | `69594164` |
 | `DATABASE_URL` | Neon Serverless PostgreSQL connection string | `postgresql://user:pass@ep-xyz-pooler.tech/db?sslmode=require` |
+| `DB_SCHEMA` | Custom PostgreSQL schema name for table isolation (default: `sociobot`) | `sociobot` |
 | `ENABLE_NEON_KEEPALIVE` | Ping Neon every 4 min to keep compute awake | `true` |
 | `YTSP_API_BASE_URL` | Stream Extractor API base URL | `https://ytsp-api.pgwiz.cloud` |
 | `PORT` | Set automatically by Render | `10000` |

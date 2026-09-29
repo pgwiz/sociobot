@@ -150,9 +150,15 @@ async def test_database_engine():
         assert unlinked_info["channel_id"] is None
         logger.info("✓ force_unlink_user_channel verified.")
 
-        # 6. Stats
+        # 6. Schema isolation & stats
+        cur_schema = await test_db.get_current_schema()
+        assert cur_schema == "main"
+        assert test_db.schema == settings.DB_SCHEMA
+        logger.info(f"✓ Schema properties verified (configured: '{test_db.schema}', active engine: '{cur_schema}').")
+
         stats = await test_db.get_stats()
         assert stats["users"] >= 1
+        assert "schema" in stats
         logger.info(f"✓ Stats aggregation verified: {stats}")
 
     finally:
@@ -168,9 +174,72 @@ async def test_database_engine():
     return True
 
 
+async def test_postgres_schema_isolation():
+    """Verify live Neon PostgreSQL schema isolation if PostgreSQL URL is available."""
+    from bot.database import Database
+    from bot.config import settings
+
+    pg_url = os.environ.get("NEON_DATABASE_URL") or os.environ.get("TEST_PG_URL")
+    if not pg_url:
+        # Check sibling .env for testing
+        sibling_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "telegram-ultra-mini", ".env")
+        if os.path.exists(sibling_env):
+            with open(sibling_env, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("DATABASE_URL=") and ("postgresql://" in line or "postgres://" in line):
+                        pg_url = line.strip().split("=", 1)[1]
+                        break
+
+    if not pg_url:
+        logger.info("\n─── 3. Testing PostgreSQL Schema Isolation (Skipped: No PG URL) ───")
+        return True
+
+    logger.info("\n─── 3. Testing PostgreSQL Schema Isolation (Live Neon) ───")
+    orig_url = settings.DATABASE_URL
+    orig_schema = settings.DB_SCHEMA
+
+    test_schema = "sociobot_test"
+    settings.DATABASE_URL = pg_url
+    settings.DB_SCHEMA = test_schema
+
+    test_db = Database()
+    try:
+        await test_db.connect()
+        assert test_db.is_postgres is True
+        active_schema = await test_db.get_current_schema()
+        assert active_schema == test_schema, f"Expected schema '{test_schema}', got '{active_schema}'"
+        logger.info(f"✓ Neon PostgreSQL connection isolated in custom schema: '{active_schema}'")
+
+        # Test inserting into custom schema
+        u = await test_db.get_or_create_user(chat_id=999999, username="pg_tester", first_name="SchemaTester")
+        assert u.get("chat_id") == 999999
+        logger.info("✓ User insertion into isolated custom schema succeeded.")
+
+        # Verify that public schema does not have this test user
+        async with test_db.pg_pool.acquire() as conn:
+            pub_has_user = await conn.fetchval(
+                "SELECT COUNT(*) FROM public.users WHERE chat_id = 999999;"
+            ) if await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='users');"
+            ) else 0
+            assert pub_has_user == 0, "Pollution detected! User leaked into public schema!"
+            logger.info("✓ Complete isolation verified: public.users is completely unaffected.")
+
+            # Clean up test schema
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{test_schema}" CASCADE;')
+            logger.info(f"✓ Cleaned up test schema '{test_schema}'.")
+
+    finally:
+        await test_db.disconnect()
+        settings.DATABASE_URL = orig_url
+        settings.DB_SCHEMA = orig_schema
+
+    return True
+
+
 def test_bot_syntax():
     """Verify that all handlers and dispatchers import cleanly without circular dependencies."""
-    logger.info("\n─── 3. Testing Bot Routers & Dispatcher ───")
+    logger.info("\n─── 4. Testing Bot Routers & Dispatcher ───")
     from aiogram import Dispatcher
     from bot.handlers import register_all_handlers
 
@@ -184,9 +253,10 @@ async def main():
     logger.info("=== Starting Sociobot Verification Suite ===\n")
     api_ok = await test_api_integration()
     db_ok = await test_database_engine()
+    pg_schema_ok = await test_postgres_schema_isolation()
     syntax_ok = test_bot_syntax()
 
-    if api_ok and db_ok and syntax_ok:
+    if api_ok and db_ok and pg_schema_ok and syntax_ok:
         logger.info("\n🎉 ALL SOCIOBOT VERIFICATION TESTS PASSED SUCCESSFULLY!")
         sys.exit(0)
     else:

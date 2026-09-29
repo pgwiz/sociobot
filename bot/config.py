@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     # Database (Neon PostgreSQL or SQLite)
     DATABASE_URL: Optional[str] = Field("sqlite:///sociobot.db", description="Database connection URI")
     DATABASE_PATH: Optional[str] = Field("sociobot.db", description="SQLite path if used")
+    DB_SCHEMA: str = Field("sociobot", description="PostgreSQL custom schema name for table isolation")
     DB_POOL_MIN_SIZE: int = Field(2, description="Min asyncpg pool connections")
     DB_POOL_MAX_SIZE: int = Field(10, description="Max asyncpg pool connections")
     ENABLE_NEON_KEEPALIVE: bool = Field(False, description="Enable Neon ping loop")

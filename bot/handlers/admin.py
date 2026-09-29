@@ -428,7 +428,7 @@ async def render_admin_dashboard(is_super: bool = False):
         f"• <b>Community Media Nodes:</b> {stats.get('media_nodes', 0)}\n"
         f"• <b>Cached Tracks:</b> {stats.get('unique_tracks', 0)}\n"
         f"• <b>Stream Extractor API:</b> {api_status}\n"
-        f"• <b>Database Engine:</b> {'Neon PostgreSQL' if db.is_postgres else 'SQLite (Local)'}\n"
+        f"• <b>Database Engine:</b> {f'Neon PostgreSQL (schema: <code>{db.schema}</code>)' if db.is_postgres else 'SQLite (Local)'}\n"
     )
     if is_super:
         text += "👑 <b>Role:</b> Super Administrator\n"

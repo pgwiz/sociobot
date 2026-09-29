@@ -18,13 +18,16 @@
      - `/stream/play`: Audio proxy stream.
      - `/download`: Pre-packaged ID3-tagged MP3 audio packages.
 
-2. **Neon Serverless PostgreSQL:**
+2. **Neon Serverless PostgreSQL & Schema Isolation:**
    - URI: Configured via `DATABASE_URL`.
+   - Custom Schema Isolation: Configured via `DB_SCHEMA` (defaults to `sociobot`). Allows `sociobot` to share the same Neon PostgreSQL instance as other bots (like `telegram-ultra-mini` using `public`) without table collisions or data leakage.
    - Driver: `asyncpg` with connection pooling.
    - Scale-to-Zero & Cold-Start Handling:
      - PgBouncer compatibility: `statement_cache_size=0` on `create_pool` to avoid prepared statement conflicts on Neon `-pooler` endpoints.
+     - Direct connection pre-creation: Executes `CREATE SCHEMA IF NOT EXISTS "<schema>"` before pool initialization, waking up compute if sleeping.
+     - Pool Checkout Setup Hook: `asyncpg.create_pool(..., setup=_setup_connection)` executes `SET search_path TO "<schema>", public;` on every connection checkout, ensuring session state persists across PgBouncer transaction-mode connection recycling and `RESET ALL`.
      - Cold-start wakeup backoff: 5 retries with exponential backoff (1.5s, 3s, 6s, 12s, 24s).
-     - Query-level retry: `_execute_pg_with_retry` automatically catches `ConnectionResetError` or `CannotConnectNowError`, re-establishes the pool, and re-executes.
+     - Query-level retry: `_execute_pg_with_retry` automatically catches `ConnectionResetError`, `CannotConnectNowError`, or `ConnectionDoesNotExistError`, re-establishes the pool, and re-executes.
      - Keep-alive ping loop: Background task executes `SELECT 1;` every 240 seconds when `ENABLE_NEON_KEEPALIVE=true`.
    - SQLite Fallback: Activated when `DATABASE_URL` is unconfigured or starts with `sqlite:///`, using `aiosqlite` with WAL mode.
 

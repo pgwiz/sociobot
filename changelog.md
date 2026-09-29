@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-29
+
+### Added
+- **PostgreSQL Custom Schema Isolation:**
+  - Configurable `DB_SCHEMA` environment setting (defaults to `sociobot`).
+  - Pre-creates custom schema (`CREATE SCHEMA IF NOT EXISTS "<schema>"`) during database initialization.
+  - Configured `asyncpg.create_pool` with `setup` hook executing `SET search_path TO "<schema>", public;` on every connection checkout, ensuring session state survives PgBouncer transaction-mode connection recycling.
+  - Configured `server_settings={"search_path": f"{schema},public"}` in startup packet.
+  - Complete collision-free coexistence: multiple bots (such as `sociobot` and `telegram-ultra-mini`) can safely share the same Neon PostgreSQL database instance without data pollution.
+  - Added active schema indicator in `/admin` Control Panel and `/stats` API response.
+  - Added live PostgreSQL schema isolation smoke test in `test_verification.py`.
+
 ## [1.1.0] - 2026-09-29
 
 ### Added

@@ -24,6 +24,7 @@ NEON_TRANSIENT_ERRORS = (
     asyncpg.CannotConnectNowError,
     asyncpg.AdminShutdownError,
     asyncpg.InterfaceError,
+    asyncpg.ConnectionDoesNotExistError,
     ConnectionResetError,
     ConnectionRefusedError,
     asyncio.TimeoutError,
@@ -37,6 +38,12 @@ class Database:
         self.sqlite_conn: Optional[aiosqlite.Connection] = None
         self._keepalive_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+
+    @property
+    def schema(self) -> str:
+        """Sanitized PostgreSQL custom schema name for table isolation."""
+        s = (getattr(settings, "DB_SCHEMA", "sociobot") or "sociobot").strip().replace('"', '').replace("'", "").replace(";", "")
+        return s or "sociobot"
 
     @property
     def is_postgres(self) -> bool:
@@ -59,10 +66,31 @@ class Database:
             if self.is_postgres:
                 max_retries = 5
                 base_delay = 1.5
+                schema = self.schema
+
+                # 1. Ensure schema exists on database
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        direct_conn = await asyncpg.connect(db_url, timeout=30.0, statement_cache_size=0)
+                        try:
+                            await direct_conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}";')
+                        finally:
+                            await direct_conn.close()
+                        break
+                    except NEON_TRANSIENT_ERRORS as e:
+                        logger.warning(f"Neon cold-start delay during schema check (attempt {attempt}): {e}")
+                        if attempt < max_retries:
+                            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+                        else:
+                            raise
+
+                # 2. Pool setup hook enforces search_path on every checkout across resets
+                async def _setup_connection(conn):
+                    await conn.execute(f'SET search_path TO "{schema}", public;')
 
                 for attempt in range(1, max_retries + 1):
                     try:
-                        logger.info(f"Connecting to Neon PostgreSQL (attempt {attempt}/{max_retries})...")
+                        logger.info(f"Connecting to Neon PostgreSQL (schema: '{schema}', attempt {attempt}/{max_retries})...")
                         self.pg_pool = await asyncpg.create_pool(
                             dsn=db_url,
                             min_size=settings.DB_POOL_MIN_SIZE,
@@ -70,13 +98,15 @@ class Database:
                             timeout=30.0,
                             command_timeout=30.0,
                             statement_cache_size=0,  # Required for PgBouncer / Neon connection pooling
-                            max_inactive_connection_lifetime=300.0
+                            max_inactive_connection_lifetime=300.0,
+                            setup=_setup_connection,
+                            server_settings={"search_path": f"{schema},public"}
                         )
 
                         async with self.pg_pool.acquire() as conn:
                             await conn.fetchval("SELECT 1;")
 
-                        logger.info("Neon PostgreSQL connected and active.")
+                        logger.info(f"Neon PostgreSQL connected and active (schema: '{schema}').")
                         await self._migrate()
 
                         if getattr(settings, "ENABLE_NEON_KEEPALIVE", False) and not self._keepalive_task:
@@ -167,7 +197,11 @@ class Database:
     async def _migrate(self) -> None:
         """Run schema migrations for PostgreSQL or SQLite."""
         if self.is_postgres:
+            schema = self.schema
+
             async def _run(conn):
+                await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}";')
+                await conn.execute(f'SET search_path TO "{schema}", public;')
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         chat_id BIGINT PRIMARY KEY,
@@ -244,7 +278,7 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_history_user ON download_history(user_chat_id);
                 """)
             await self._execute_pg_with_retry(_run)
-            logger.info("Neon PostgreSQL schema migrations applied successfully.")
+            logger.info(f"Neon PostgreSQL schema migrations applied successfully to schema '{schema}'.")
         else:
             await self.sqlite_conn.executescript("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -957,14 +991,27 @@ class Database:
             await self.sqlite_conn.commit()
             return True
 
+    async def get_current_schema(self) -> Optional[str]:
+        """Return the active PostgreSQL schema or 'main' for SQLite."""
+        if not self.is_connected:
+            return None
+        if self.is_postgres:
+            async def _run(conn):
+                return await conn.fetchval("SELECT current_schema();")
+            return await self._execute_pg_with_retry(_run)
+        elif self.sqlite_conn:
+            return "main"
+        return None
+
     # ── Admin Dashboard Statistics ────────────────────────────────────────
 
     async def get_stats(self) -> Dict[str, Any]:
         """Aggregate system metrics for the administrative dashboard."""
         if not self.is_connected:
-            return {"users": 0, "channels": 0, "media_nodes": 0, "unique_tracks": 0}
+            return {"users": 0, "channels": 0, "media_nodes": 0, "unique_tracks": 0, "schema": "disconnected"}
 
         if self.is_postgres:
+            schema = self.schema
             async def _run(conn):
                 total_users = await conn.fetchval("SELECT COUNT(*) FROM users;")
                 active_channels = await conn.fetchval("SELECT COUNT(DISTINCT channel_id) FROM users WHERE is_storage_active = TRUE AND channel_id IS NOT NULL;")
@@ -974,7 +1021,8 @@ class Database:
                     "users": total_users or 0,
                     "channels": active_channels or 0,
                     "media_nodes": media_nodes or 0,
-                    "unique_tracks": unique_tracks or 0
+                    "unique_tracks": unique_tracks or 0,
+                    "schema": schema
                 }
             return await self._execute_pg_with_retry(_run)
         else:
@@ -987,7 +1035,8 @@ class Database:
                 "users": await _fetch("SELECT COUNT(*) FROM users;"),
                 "channels": await _fetch("SELECT COUNT(DISTINCT channel_id) FROM users WHERE is_storage_active = 1 AND channel_id IS NOT NULL;"),
                 "media_nodes": await _fetch("SELECT COUNT(*) FROM user_media_storage WHERE is_available = 1;"),
-                "unique_tracks": await _fetch("SELECT COUNT(*) FROM tracks;")
+                "unique_tracks": await _fetch("SELECT COUNT(*) FROM tracks;"),
+                "schema": "sqlite"
             }
 
     async def cleanup_expired_cache(self) -> int:
