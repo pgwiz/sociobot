@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import aiosqlite
 import asyncpg
 from bot.config import settings
@@ -178,9 +178,11 @@ class Database:
                         is_storage_active BOOLEAN DEFAULT TRUE,
                         terms_accepted BOOLEAN DEFAULT FALSE,
                         is_admin BOOLEAN DEFAULT FALSE,
+                        is_banned BOOLEAN DEFAULT FALSE,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                     );
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
 
                     CREATE TABLE IF NOT EXISTS user_media_storage (
                         id BIGSERIAL PRIMARY KEY,
@@ -254,6 +256,7 @@ class Database:
                     is_storage_active INTEGER DEFAULT 1,
                     terms_accepted INTEGER DEFAULT 0,
                     is_admin INTEGER DEFAULT 0,
+                    is_banned INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT (datetime('now')),
                     last_active TEXT DEFAULT (datetime('now'))
                 );
@@ -318,6 +321,11 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_history_user ON download_history(user_chat_id);
             """)
             await self.sqlite_conn.commit()
+            try:
+                await self.sqlite_conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0;")
+                await self.sqlite_conn.commit()
+            except Exception:
+                pass
             logger.info("SQLite schema migrations applied successfully.")
 
     # ── User & Channel Management ─────────────────────────────────────────
@@ -331,7 +339,7 @@ class Database:
     ) -> Dict[str, Any]:
         """Fetch or insert a user record, updating activity timestamp."""
         if not self.is_connected:
-            return {"chat_id": chat_id, "username": username, "first_name": first_name, "is_admin": is_admin}
+            return {"chat_id": chat_id, "username": username, "first_name": first_name, "is_admin": is_admin, "is_banned": False}
 
         if self.is_postgres:
             async def _run(conn):
@@ -344,7 +352,7 @@ class Database:
                         first_name = EXCLUDED.first_name,
                         last_active = NOW(),
                         is_admin = CASE WHEN users.is_admin THEN TRUE ELSE EXCLUDED.is_admin END
-                    RETURNING chat_id, username, first_name, channel_id, channel_title, is_storage_active, terms_accepted, is_admin;
+                    RETURNING chat_id, username, first_name, channel_id, channel_title, is_storage_active, terms_accepted, is_admin, is_banned;
                     """,
                     chat_id, username, first_name, is_admin
                 )
@@ -364,7 +372,7 @@ class Database:
             )
             await self.sqlite_conn.commit()
             cursor = await self.sqlite_conn.execute(
-                "SELECT chat_id, username, first_name, channel_id, channel_title, is_storage_active, terms_accepted, is_admin FROM users WHERE chat_id = ?;",
+                "SELECT chat_id, username, first_name, channel_id, channel_title, is_storage_active, terms_accepted, is_admin, is_banned FROM users WHERE chat_id = ?;",
                 (chat_id,)
             )
             row = await cursor.fetchone()
@@ -373,6 +381,7 @@ class Database:
                 d["is_storage_active"] = bool(d.get("is_storage_active", 1))
                 d["terms_accepted"] = bool(d.get("terms_accepted", 0))
                 d["is_admin"] = bool(d.get("is_admin", 0))
+                d["is_banned"] = bool(d.get("is_banned", 0))
                 return d
             return {}
 
@@ -996,6 +1005,331 @@ class Database:
             await self.sqlite_conn.commit()
             return cursor.rowcount
 
+    # ── Super Admin User Management ───────────────────────────────────────
+
+    async def is_user_banned(self, chat_id: int) -> bool:
+        """Check if user is currently banned."""
+        if not self.is_connected:
+            return False
+
+        if self.is_postgres:
+            async def _run(conn):
+                val = await conn.fetchval("SELECT is_banned FROM users WHERE chat_id = $1;", chat_id)
+                return bool(val) if val is not None else False
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cursor = await self.sqlite_conn.execute("SELECT is_banned FROM users WHERE chat_id = ?;", (chat_id,))
+            row = await cursor.fetchone()
+            return bool(row[0]) if (row and row[0] is not None) else False
+
+    async def list_users(
+        self,
+        page: int = 1,
+        page_size: int = 8,
+        search: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """List registered users with storage stats and pagination."""
+        if not self.is_connected:
+            return [], 0
+
+        offset = max(0, (page - 1) * page_size)
+        search_pattern = f"%{search.strip()}%" if search and search.strip() else None
+        exact_id = search.strip() if search and search.strip().isdigit() else None
+
+        if self.is_postgres:
+            async def _run(conn):
+                if search_pattern:
+                    total = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) FROM users
+                        WHERE username ILIKE $1 OR first_name ILIKE $1 OR CAST(chat_id AS TEXT) = $2;
+                        """,
+                        search_pattern, exact_id or "-1"
+                    )
+                    rows = await conn.fetch(
+                        """
+                        SELECT u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
+                               u.is_storage_active, u.is_admin, u.is_banned, u.created_at, u.last_active,
+                               COUNT(s.id) AS vault_count
+                        FROM users u
+                        LEFT JOIN user_media_storage s ON (u.chat_id = s.user_chat_id AND s.is_available = TRUE)
+                        WHERE u.username ILIKE $1 OR u.first_name ILIKE $1 OR CAST(u.chat_id AS TEXT) = $2
+                        GROUP BY u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
+                                 u.is_storage_active, u.is_admin, u.is_banned, u.created_at, u.last_active
+                        ORDER BY u.last_active DESC
+                        LIMIT $3 OFFSET $4;
+                        """,
+                        search_pattern, exact_id or "-1", page_size, offset
+                    )
+                else:
+                    total = await conn.fetchval("SELECT COUNT(*) FROM users;")
+                    rows = await conn.fetch(
+                        """
+                        SELECT u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
+                               u.is_storage_active, u.is_admin, u.is_banned, u.created_at, u.last_active,
+                               COUNT(s.id) AS vault_count
+                        FROM users u
+                        LEFT JOIN user_media_storage s ON (u.chat_id = s.user_chat_id AND s.is_available = TRUE)
+                        GROUP BY u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
+                                 u.is_storage_active, u.is_admin, u.is_banned, u.created_at, u.last_active
+                        ORDER BY u.last_active DESC
+                        LIMIT $1 OFFSET $2;
+                        """,
+                        page_size, offset
+                    )
+                return [dict(r) for r in rows], (total or 0)
+            return await self._execute_pg_with_retry(_run)
+        else:
+            if search_pattern:
+                cur_total = await self.sqlite_conn.execute(
+                    """
+                    SELECT COUNT(*) FROM users
+                    WHERE username LIKE ? OR first_name LIKE ? OR CAST(chat_id AS TEXT) = ?;
+                    """,
+                    (search_pattern, search_pattern, exact_id or "-1")
+                )
+                r_total = await cur_total.fetchone()
+                total = r_total[0] if r_total else 0
+
+                cur_rows = await self.sqlite_conn.execute(
+                    """
+                    SELECT u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
+                           u.is_storage_active, u.is_admin, u.is_banned, u.created_at, u.last_active,
+                           COUNT(s.id) AS vault_count
+                    FROM users u
+                    LEFT JOIN user_media_storage s ON (u.chat_id = s.user_chat_id AND s.is_available = 1)
+                    WHERE u.username LIKE ? OR u.first_name LIKE ? OR CAST(u.chat_id AS TEXT) = ?
+                    GROUP BY u.chat_id
+                    ORDER BY u.last_active DESC
+                    LIMIT ? OFFSET ?;
+                    """,
+                    (search_pattern, search_pattern, exact_id or "-1", page_size, offset)
+                )
+            else:
+                cur_total = await self.sqlite_conn.execute("SELECT COUNT(*) FROM users;")
+                r_total = await cur_total.fetchone()
+                total = r_total[0] if r_total else 0
+
+                cur_rows = await self.sqlite_conn.execute(
+                    """
+                    SELECT u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
+                           u.is_storage_active, u.is_admin, u.is_banned, u.created_at, u.last_active,
+                           COUNT(s.id) AS vault_count
+                    FROM users u
+                    LEFT JOIN user_media_storage s ON (u.chat_id = s.user_chat_id AND s.is_available = 1)
+                    GROUP BY u.chat_id
+                    ORDER BY u.last_active DESC
+                    LIMIT ? OFFSET ?;
+                    """,
+                    (page_size, offset)
+                )
+
+            rows = await cur_rows.fetchall()
+            user_list = []
+            for r in rows:
+                d = dict(r)
+                d["is_storage_active"] = bool(d.get("is_storage_active", 0))
+                d["is_admin"] = bool(d.get("is_admin", 0))
+                d["is_banned"] = bool(d.get("is_banned", 0))
+                user_list.append(d)
+            return user_list, total
+
+    async def get_user_details(self, chat_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieve complete profile, storage channels, and download statistics for a user."""
+        if not self.is_connected:
+            return None
+
+        if self.is_postgres:
+            async def _run(conn):
+                row = await conn.fetchrow(
+                    """
+                    SELECT u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
+                           u.is_storage_active, u.terms_accepted, u.is_admin, u.is_banned, u.created_at, u.last_active,
+                           (SELECT COUNT(*) FROM user_media_storage s WHERE s.user_chat_id = u.chat_id AND s.is_available = TRUE) AS vault_count,
+                           (SELECT COUNT(*) FROM download_history h WHERE h.user_chat_id = u.chat_id) AS download_count
+                    FROM users u
+                    WHERE u.chat_id = $1;
+                    """,
+                    chat_id
+                )
+                return dict(row) if row else None
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute(
+                """
+                SELECT u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
+                       u.is_storage_active, u.terms_accepted, u.is_admin, u.is_banned, u.created_at, u.last_active,
+                       (SELECT COUNT(*) FROM user_media_storage s WHERE s.user_chat_id = u.chat_id AND s.is_available = 1) AS vault_count,
+                       (SELECT COUNT(*) FROM download_history h WHERE h.user_chat_id = u.chat_id) AS download_count
+                FROM users u
+                WHERE u.chat_id = ?;
+                """,
+                (chat_id,)
+            )
+            row = await cur.fetchone()
+            if row:
+                d = dict(row)
+                d["is_storage_active"] = bool(d.get("is_storage_active", 0))
+                d["terms_accepted"] = bool(d.get("terms_accepted", 0))
+                d["is_admin"] = bool(d.get("is_admin", 0))
+                d["is_banned"] = bool(d.get("is_banned", 0))
+                return d
+            return None
+
+    async def get_user_vault_tracks(
+        self,
+        user_chat_id: int,
+        page: int = 1,
+        page_size: int = 6
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Retrieve paginated list of media tracks stored in a user's channel."""
+        if not self.is_connected:
+            return [], 0
+
+        offset = max(0, (page - 1) * page_size)
+
+        if self.is_postgres:
+            async def _run(conn):
+                total = await conn.fetchval(
+                    "SELECT COUNT(*) FROM user_media_storage WHERE user_chat_id = $1 AND is_available = TRUE;",
+                    user_chat_id
+                )
+                rows = await conn.fetch(
+                    """
+                    SELECT s.id, s.track_id, s.quality, s.channel_msg_id, s.channel_post_url, s.telegram_file_id, s.created_at,
+                           t.title, t.artist, t.duration_secs, t.thumbnail_url
+                    FROM user_media_storage s
+                    LEFT JOIN tracks t ON (s.track_id = t.track_id AND s.quality = t.quality)
+                    WHERE s.user_chat_id = $1 AND s.is_available = TRUE
+                    ORDER BY s.created_at DESC
+                    LIMIT $2 OFFSET $3;
+                    """,
+                    user_chat_id, page_size, offset
+                )
+                return [dict(r) for r in rows], (total or 0)
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur_tot = await self.sqlite_conn.execute(
+                "SELECT COUNT(*) FROM user_media_storage WHERE user_chat_id = ? AND is_available = 1;",
+                (user_chat_id,)
+            )
+            r_tot = await cur_tot.fetchone()
+            total = r_tot[0] if r_tot else 0
+
+            cur = await self.sqlite_conn.execute(
+                """
+                SELECT s.id, s.track_id, s.quality, s.channel_msg_id, s.channel_post_url, s.telegram_file_id, s.created_at,
+                       t.title, t.artist, t.duration_secs, t.thumbnail_url
+                FROM user_media_storage s
+                LEFT JOIN tracks t ON (s.track_id = t.track_id AND s.quality = t.quality)
+                WHERE s.user_chat_id = ? AND s.is_available = 1
+                ORDER BY s.created_at DESC
+                LIMIT ? OFFSET ?;
+                """,
+                (user_chat_id, page_size, offset)
+            )
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows], total
+
+    async def toggle_user_admin(self, chat_id: int) -> bool:
+        """Toggle is_admin status for a user and return the new value."""
+        if not self.is_connected:
+            return False
+
+        if self.is_postgres:
+            async def _run(conn):
+                row = await conn.fetchrow(
+                    "UPDATE users SET is_admin = NOT is_admin WHERE chat_id = $1 RETURNING is_admin;",
+                    chat_id
+                )
+                return bool(row["is_admin"]) if row else False
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute("SELECT is_admin FROM users WHERE chat_id = ?;", (chat_id,))
+            row = await cur.fetchone()
+            new_val = 0 if (row and row[0]) else 1
+            await self.sqlite_conn.execute("UPDATE users SET is_admin = ? WHERE chat_id = ?;", (new_val, chat_id))
+            await self.sqlite_conn.commit()
+            return bool(new_val)
+
+    async def toggle_user_ban(self, chat_id: int) -> bool:
+        """Toggle is_banned status for a user and return the new value."""
+        if not self.is_connected:
+            return False
+
+        if self.is_postgres:
+            async def _run(conn):
+                row = await conn.fetchrow(
+                    "UPDATE users SET is_banned = NOT is_banned WHERE chat_id = $1 RETURNING is_banned;",
+                    chat_id
+                )
+                return bool(row["is_banned"]) if row else False
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute("SELECT is_banned FROM users WHERE chat_id = ?;", (chat_id,))
+            row = await cur.fetchone()
+            new_val = 0 if (row and row[0]) else 1
+            await self.sqlite_conn.execute("UPDATE users SET is_banned = ? WHERE chat_id = ?;", (new_val, chat_id))
+            await self.sqlite_conn.commit()
+            return bool(new_val)
+
+    async def force_unlink_user_channel(self, chat_id: int) -> None:
+        """Forcefully disconnect a user's storage channel and mark their stored media inactive."""
+        if not self.is_connected:
+            return
+
+        if self.is_postgres:
+            async def _run(conn):
+                await conn.execute(
+                    "UPDATE users SET channel_id = NULL, channel_title = NULL, is_storage_active = FALSE WHERE chat_id = $1;",
+                    chat_id
+                )
+                await conn.execute(
+                    "UPDATE user_media_storage SET is_available = FALSE WHERE user_chat_id = $1;",
+                    chat_id
+                )
+            await self._execute_pg_with_retry(_run)
+        else:
+            await self.sqlite_conn.execute(
+                "UPDATE users SET channel_id = NULL, channel_title = NULL, is_storage_active = 0 WHERE chat_id = ?;",
+                (chat_id,)
+            )
+            await self.sqlite_conn.execute(
+                "UPDATE user_media_storage SET is_available = 0 WHERE user_chat_id = ?;",
+                (chat_id,)
+            )
+            await self.sqlite_conn.commit()
+
+    async def find_user_by_identifier(self, query: str) -> Optional[Dict[str, Any]]:
+        """Look up user by numeric ID or username."""
+        clean = query.strip()
+        if not clean:
+            return None
+
+        # Check numeric ID
+        if clean.isdigit() or (clean.startswith("-") and clean[1:].isdigit()):
+            return await self.get_user_details(int(clean))
+
+        clean_user = clean.lstrip("@")
+
+        if self.is_postgres:
+            async def _run(conn):
+                row = await conn.fetchrow(
+                    "SELECT chat_id FROM users WHERE username ILIKE $1 LIMIT 1;",
+                    clean_user
+                )
+                return row["chat_id"] if row else None
+            cid = await self._execute_pg_with_retry(_run)
+            return await self.get_user_details(cid) if cid else None
+        else:
+            cur = await self.sqlite_conn.execute(
+                "SELECT chat_id FROM users WHERE username LIKE ? LIMIT 1;",
+                (clean_user,)
+            )
+            row = await cur.fetchone()
+            return await self.get_user_details(row[0]) if row else None
+
 
 # Singleton instance
 db = Database()
+

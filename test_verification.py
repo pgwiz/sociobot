@@ -17,13 +17,20 @@ async def test_api_integration():
     base_url = "https://ytsp-api.pgwiz.cloud"
 
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        # Test /health
-        try:
-            h_resp = await client.get(f"{base_url}/health")
-            assert h_resp.status_code == 200, f"Health check returned {h_resp.status_code}"
-            logger.info("✓ /health endpoint active and healthy.")
-        except Exception as e:
-            logger.error(f"✗ /health failed: {e}")
+        # Test /health with retry
+        h_ok = False
+        for attempt in range(1, 4):
+            try:
+                h_resp = await client.get(f"{base_url}/health")
+                if h_resp.status_code == 200:
+                    logger.info("✓ /health endpoint active and healthy.")
+                    h_ok = True
+                    break
+            except Exception as e:
+                logger.warning(f"Health check attempt {attempt} failed: {e}")
+                await asyncio.sleep(1.0)
+        if not h_ok:
+            logger.error("✗ /health failed after retries")
             return False
 
         # Test Search
@@ -114,7 +121,36 @@ async def test_database_engine():
         assert check_after is None
         logger.info("✓ User media deletion verified.")
 
-        # 5. Stats
+        # 5. Super Admin user management methods
+        users_list, total_u = await test_db.list_users(page=1, page_size=10)
+        assert total_u >= 1
+        assert any(u["chat_id"] == 123456 for u in users_list)
+        logger.info(f"✓ list_users verified: {total_u} users found.")
+
+        user_details = await test_db.get_user_details(123456)
+        assert user_details is not None
+        assert user_details["chat_id"] == 123456
+        assert user_details["is_banned"] is False
+        logger.info("✓ get_user_details verified.")
+
+        # Toggle Admin
+        new_adm = await test_db.toggle_user_admin(123456)
+        assert new_adm is True
+        logger.info("✓ toggle_user_admin verified.")
+
+        # Toggle Ban
+        new_ban = await test_db.toggle_user_ban(123456)
+        assert new_ban is True
+        assert await test_db.is_user_banned(123456) is True
+        logger.info("✓ toggle_user_ban verified.")
+
+        # Force Unlink Channel
+        await test_db.force_unlink_user_channel(123456)
+        unlinked_info = await test_db.get_user_channel(123456)
+        assert unlinked_info["channel_id"] is None
+        logger.info("✓ force_unlink_user_channel verified.")
+
+        # 6. Stats
         stats = await test_db.get_stats()
         assert stats["users"] >= 1
         logger.info(f"✓ Stats aggregation verified: {stats}")

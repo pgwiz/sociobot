@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-29
+
+### Added
+- **Super Admin User Management Suite:**
+  - Configurable `SUPER_ADMIN_IDS` in `.env` with fallback to `ADMIN_CHAT_ID`.
+  - `/users [search]` paginated interactive user directory with channel status and vault counts.
+  - `/user <id_or_username>` deep inspection profile card.
+  - Interactive management actions:
+    - `[ 📁 View Stored Vault ]`: Paginated browser of all tracks stored in a user's channel.
+    - `[ 🔗 Unlink Channel ]`: Forcefully disconnect a user's storage channel and mark their files inactive.
+    - `[ 👑 Make Admin / Demote Admin ]`: Promote or demote admins.
+    - `[ 🚫 Ban User / Unban User ]`: Restrict abusive users from search and downloads.
+    - `/dm <user_id> <message>`: Official administrative direct messaging.
+  - Anti-abuse ban checks in search and download pipelines.
+  - Comprehensive Render Web Service deployment guide in `readme.md`.
+
 ## [1.0.0] - 2026-09-29
 
 ### Added

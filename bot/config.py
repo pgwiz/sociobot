@@ -3,7 +3,7 @@
 import os
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = Field("dummy_token", description="Bot token from @BotFather")
     ADMIN_CHAT_ID: int = Field(0, description="Telegram User ID of Admin")
+    SUPER_ADMIN_IDS: str = Field("", description="Comma-separated Telegram user IDs of Super Admins")
 
     # Stream Extractor API
     YTSP_API_BASE_URL: str = Field("https://ytsp-api.pgwiz.cloud", description="Stream Extractor API base URL")
@@ -49,6 +50,18 @@ class Settings(BaseSettings):
     ENABLE_HEALTH_SERVER: bool = Field(True, description="Run lightweight FastAPI health/metrics server")
     API_HOST: str = Field("0.0.0.0", description="API server host")
     API_PORT: int = Field(default_factory=lambda: int(os.environ.get("PORT", "8080")), description="API server port")
+
+    def get_super_admin_ids(self) -> List[int]:
+        """Return list of numeric user IDs authorized as Super Admins."""
+        ids = set()
+        if self.ADMIN_CHAT_ID:
+            ids.add(self.ADMIN_CHAT_ID)
+        if self.SUPER_ADMIN_IDS:
+            for item in self.SUPER_ADMIN_IDS.split(","):
+                clean = item.strip()
+                if clean.isdigit():
+                    ids.add(int(clean))
+        return list(ids)
 
 
 # Singleton instance

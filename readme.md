@@ -69,9 +69,52 @@ Instead of relying on a centralized bot-owned dump channel, users link their own
 | `/cleanup` | Purges leftover temp files, removes expired API cache, and flushes RAM. |
 | `/broadcast <text>` | Sends system notifications to all registered users. |
 
+### 👑 Super Admin User Management
+| Command | Description |
+| :--- | :--- |
+| `/users [search]` | Interactive paginated browser to view all registered users, channel status, and vault counts. |
+| `/user <id or @username>` | Deep inspection card for a specific user with management action buttons. |
+| `/dm <user_id> <message>` | Send an official direct message to a user. |
+
+**Super Admin In-Bot Actions:**
+- `[ 📁 View Stored Vault ]`: Browse the tracks currently archived in that user's channel.
+- `[ 🔗 Unlink Channel ]`: Forcefully disconnect an invalid or abusive channel.
+- `[ 👑 Make Admin / Demote Admin ]`: Promote or demote admins.
+- `[ 🚫 Ban User / Unban User ]`: Block abusive users from using the bot.
+
 ---
 
-## 🚀 Quick Setup & Installation
+## 🚀 Deployment Guide (Render Web Service)
+
+Sociobot is pre-configured for seamless 24/7 hosting on [Render](https://render.com) as a Web Service.
+
+### 1. Create a Web Service on Render
+- Connect your GitHub repository (`https://github.com/pgwiz/sociobot` or your private `WiPTech/sociobot`).
+- **Runtime:** `Python 3`
+- **Build Command:** `pip install -r requirements.txt`
+- **Start Command:** `gunicorn your_application.wsgi` (or `uvicorn bot.main:app --host 0.0.0.0 --port 10000`)
+- **Health Check Path:** `/health`
+
+### 2. Required Environment Variables on Render
+Add the following in the Render **Environment** dashboard:
+
+| Variable | Description | Example |
+| :--- | :--- | :--- |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather *(Required)* | `8126033137:AAFl...` |
+| `SUPER_ADMIN_IDS` | Your Telegram User ID *(Required for Super Admin)* | `69594164` |
+| `ADMIN_CHAT_ID` | Primary admin Telegram ID | `69594164` |
+| `DATABASE_URL` | Neon Serverless PostgreSQL connection string | `postgresql://user:pass@ep-xyz-pooler.tech/db?sslmode=require` |
+| `ENABLE_NEON_KEEPALIVE` | Ping Neon every 4 min to keep compute awake | `true` |
+| `YTSP_API_BASE_URL` | Stream Extractor API base URL | `https://ytsp-api.pgwiz.cloud` |
+| `PORT` | Set automatically by Render | `10000` |
+
+> [!TIP]
+> **Why Neon PostgreSQL is recommended for Render:**
+> Render container disks are ephemeral on free instances. Using a remote PostgreSQL database (like Neon) ensures user channel registrations, media mapping links, and download history persist across deploys and container restarts.
+
+---
+
+## 💻 Local Setup & Development
 
 ### 1. Prerequisites
 - Python 3.10+
@@ -97,9 +140,9 @@ cp .env.example .env
 Key variables:
 ```ini
 TELEGRAM_BOT_TOKEN=123456789:ABCDEF...
+SUPER_ADMIN_IDS=12345678
 ADMIN_CHAT_ID=12345678
-DATABASE_URL=postgresql://user:pass@ep-xyz-pooler.neon.tech/dbname?sslmode=require
-# Or leave DATABASE_URL blank to default to local SQLite (sociobot.db)
+DATABASE_URL=sqlite:///sociobot.db
 ```
 
 ### 4. Run the Verification Suite

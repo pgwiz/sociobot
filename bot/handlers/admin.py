@@ -1,7 +1,10 @@
-"""Admin Control Panel & System Maintenance for Sociobot.
+"""Admin Control Panel, System Maintenance & Super Admin User Management for Sociobot.
 
 Features:
 - /admin: Overview of registered users, active storage channels, and community media nodes.
+- /users [search]: Super Admin interactive paginated user directory.
+- /user <id_or_username>: Super Admin user deep inspection and controls.
+- /dm <user_id> <msg>: Super Admin direct message to user.
 - /cleanup: Temp directory file cleanup, expired API cache purge, RAM flush.
 - /broadcast: System announcements to registered users.
 - Role-based /help command.
@@ -9,7 +12,9 @@ Features:
 
 import os
 import glob
+import math
 import logging
+from typing import Optional, List, Dict, Any
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
@@ -17,15 +22,25 @@ import httpx
 from bot.config import settings
 from bot.database import db
 from bot.cache import cache
-from bot.keyboards.inline import get_admin_dashboard_keyboard
+from bot.keyboards.inline import (
+    get_admin_dashboard_keyboard,
+    get_users_browser_keyboard,
+    get_user_detail_keyboard,
+    get_user_vault_keyboard
+)
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
 
 
+def is_super_admin(user_id: int) -> bool:
+    """Check if user has Super Admin authority."""
+    return user_id in settings.get_super_admin_ids()
+
+
 async def is_admin_user(user_id: int) -> bool:
-    """Check if user has administrative privileges."""
-    if user_id == settings.ADMIN_CHAT_ID:
+    """Check if user has general administrative privileges (including Super Admins)."""
+    if is_super_admin(user_id):
         return True
     user = await db.get_or_create_user(user_id)
     return bool(user.get("is_admin", False))
@@ -34,7 +49,9 @@ async def is_admin_user(user_id: int) -> bool:
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Provide role-based command reference."""
-    is_adm = await is_admin_user(message.from_user.id)
+    user_id = message.from_user.id
+    is_adm = await is_admin_user(user_id)
+    is_super = is_super_admin(user_id)
 
     help_text = (
         "🤖 <b>Sociobot Commands</b>\n\n"
@@ -59,33 +76,254 @@ async def cmd_help(message: Message):
             "• <code>/broadcast &lt;msg&gt;</code> - Send announcement"
         )
 
+    if is_super:
+        help_text += (
+            "\n\n<b>👑 Super Admin Tools:</b>\n"
+            "• <code>/users [search]</code> - Interactive user browser\n"
+            "• <code>/user &lt;id or @username&gt;</code> - Inspect user profile & vault\n"
+            "• <code>/dm &lt;user_id&gt; &lt;msg&gt;</code> - Send direct message to user"
+        )
+
     await message.answer(help_text, parse_mode="HTML")
 
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     """Display Administrative Dashboard."""
-    if not await is_admin_user(message.from_user.id):
+    user_id = message.from_user.id
+    if not await is_admin_user(user_id):
         return
 
-    text, kb = await render_admin_dashboard()
+    text, kb = await render_admin_dashboard(is_super=is_super_admin(user_id))
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data == "cb:adm_refresh")
 async def cb_admin_refresh(callback: CallbackQuery):
     """Refresh admin stats."""
-    if not await is_admin_user(callback.from_user.id):
+    user_id = callback.from_user.id
+    if not await is_admin_user(user_id):
         await callback.answer("Unauthorized", show_alert=True)
         return
 
-    text, kb = await render_admin_dashboard()
+    text, kb = await render_admin_dashboard(is_super=is_super_admin(user_id))
     try:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     except Exception:
         pass
     await callback.answer("Stats updated.")
 
+
+# ── Super Admin: User Browser & Directory ───────────────────────────────
+
+@router.message(Command("users"))
+async def cmd_users(message: Message):
+    """Open interactive user browser for Super Admin."""
+    if not is_super_admin(message.from_user.id):
+        return
+
+    args = message.text.strip().split(maxsplit=1)
+    search = args[1].strip() if len(args) > 1 else None
+
+    text, kb = await render_users_browser(page=1, search=search)
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("cb:usr_page:"))
+async def cb_users_page(callback: CallbackQuery):
+    """Switch page in user directory."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    page = int(callback.data.split(":")[2])
+    text, kb = await render_users_browser(page=page)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.message(Command("user"))
+async def cmd_user(message: Message):
+    """Directly inspect a specific user by ID or @username."""
+    if not is_super_admin(message.from_user.id):
+        return
+
+    args = message.text.strip().split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Usage: <code>/user &lt;chat_id or @username&gt;</code>", parse_mode="HTML")
+        return
+
+    target = args[1].strip()
+    user_data = await db.find_user_by_identifier(target)
+    if not user_data:
+        await message.answer(f"❌ User <code>{target}</code> not found in database.", parse_mode="HTML")
+        return
+
+    text, kb = render_user_profile(user_data)
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("cb:usr_view:"))
+async def cb_user_view(callback: CallbackQuery):
+    """View deep profile for a specific user from list."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    user_data = await db.get_user_details(target_id)
+    if not user_data:
+        await callback.answer("User record not found.", show_alert=True)
+        return
+
+    text, kb = render_user_profile(user_data)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cb:usr_vault:"))
+async def cb_user_vault(callback: CallbackQuery):
+    """Browse stored vault tracks for a user."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 1
+
+    tracks, total = await db.get_user_vault_tracks(target_id, page=page, page_size=6)
+    total_pages = max(1, math.ceil(total / 6))
+
+    user_data = await db.get_user_details(target_id)
+    uname = f"@{user_data['username']}" if user_data and user_data.get("username") else str(target_id)
+
+    text = (
+        f"📁 <b>Stored Vault:</b> <code>{uname}</code>\n"
+        f"• Total Saved Tracks: <b>{total}</b>\n"
+        f"• Channel ID: <code>{user_data.get('channel_id', 'None')}</code>\n\n"
+        f"Tap any track link to open post in their channel:"
+    )
+
+    kb = get_user_vault_keyboard(target_id, tracks, page, total_pages)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cb:usr_unlink:"))
+async def cb_user_unlink(callback: CallbackQuery):
+    """Forcefully disconnect a user's storage channel."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    await db.force_unlink_user_channel(target_id)
+    await callback.answer("Channel disconnected for this user.", show_alert=True)
+
+    # Refresh profile card
+    user_data = await db.get_user_details(target_id)
+    if user_data:
+        text, kb = render_user_profile(user_data)
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("cb:usr_toggle_adm:"))
+async def cb_user_toggle_adm(callback: CallbackQuery):
+    """Toggle admin privileges for a user."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    new_status = await db.toggle_user_admin(target_id)
+    status_str = "Promoted to Admin" if new_status else "Demoted from Admin"
+    await callback.answer(f"User {status_str}.", show_alert=True)
+
+    user_data = await db.get_user_details(target_id)
+    if user_data:
+        text, kb = render_user_profile(user_data)
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("cb:usr_toggle_ban:"))
+async def cb_user_toggle_ban(callback: CallbackQuery):
+    """Toggle ban status for a user."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    new_banned = await db.toggle_user_ban(target_id)
+    status_str = "Banned" if new_banned else "Unbanned"
+    await callback.answer(f"User {status_str}.", show_alert=True)
+
+    user_data = await db.get_user_details(target_id)
+    if user_data:
+        text, kb = render_user_profile(user_data)
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+
+
+@router.message(Command("dm"))
+async def cmd_dm(message: Message, bot: Bot):
+    """Send official direct message to a user: /dm <user_id> <message>."""
+    if not is_super_admin(message.from_user.id):
+        return
+
+    parts = message.text.strip().split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Usage: <code>/dm &lt;user_id&gt; &lt;message&gt;</code>", parse_mode="HTML")
+        return
+
+    target_id_str, text_to_send = parts[1].strip(), parts[2].strip()
+    if not target_id_str.isdigit():
+        await message.answer("User ID must be numeric.", parse_mode="HTML")
+        return
+
+    target_id = int(target_id_str)
+    try:
+        await bot.send_message(
+            chat_id=target_id,
+            text=f"📩 <b>Message from Sociobot Administration:</b>\n\n{text_to_send}",
+            parse_mode="HTML"
+        )
+        await message.answer(f"✅ Message successfully sent to user <code>{target_id}</code>.", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Failed to deliver message to <code>{target_id}</code>: {e}", parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("cb:usr_dm:"))
+async def cb_usr_dm_prompt(callback: CallbackQuery):
+    """Provide quick hint on sending a DM."""
+    target_id = callback.data.split(":")[2]
+    await callback.answer(f"To message this user, type: /dm {target_id} <your message>", show_alert=True)
+
+
+@router.callback_query(F.data == "cb:noop")
+async def cb_noop(callback: CallbackQuery):
+    """Acknowledge non-interactive status buttons."""
+    await callback.answer()
+
+
+# ── System Maintenance & Broadcast ──────────────────────────────────────
 
 @router.message(Command("cleanup"))
 @router.callback_query(F.data == "cb:adm_cleanup")
@@ -95,7 +333,6 @@ async def handle_cleanup(event: Message | CallbackQuery):
     if not await is_admin_user(user_id):
         return
 
-    # 1. Clean temp download directory
     cleaned_files = 0
     temp_dir = settings.DOWNLOAD_DIR
     for f in glob.glob(os.path.join(temp_dir, "*")):
@@ -106,10 +343,7 @@ async def handle_cleanup(event: Message | CallbackQuery):
         except Exception:
             pass
 
-    # 2. Purge expired DB cache
     cleaned_db = await db.cleanup_expired_cache()
-
-    # 3. Flush in-memory RAM cache
     cache.clear_ram()
 
     report = (
@@ -140,17 +374,16 @@ async def cmd_broadcast(message: Message, bot: Bot):
     announcement = parts[1].strip()
     status_msg = await message.answer("📢 Sending broadcast...", parse_mode="HTML")
 
-    # Fetch users from DB
     sent = 0
     failed = 0
 
     if db.is_postgres:
         async def _run(conn):
-            return await conn.fetch("SELECT chat_id FROM users;")
+            return await conn.fetch("SELECT chat_id FROM users WHERE is_banned = FALSE;")
         rows = await db._execute_pg_with_retry(_run)
         chat_ids = [r["chat_id"] for r in rows]
     else:
-        cur = await db.sqlite_conn.execute("SELECT chat_id FROM users;")
+        cur = await db.sqlite_conn.execute("SELECT chat_id FROM users WHERE is_banned = 0;")
         rows = await cur.fetchall()
         chat_ids = [r[0] for r in rows]
 
@@ -173,11 +406,12 @@ async def cmd_broadcast(message: Message, bot: Bot):
     )
 
 
-async def render_admin_dashboard():
+# ── Render Helpers ───────────────────────────────────────────────────────
+
+async def render_admin_dashboard(is_super: bool = False):
     """Format dashboard message and buttons."""
     stats = await db.get_stats()
 
-    # Test stream API health
     api_status = "🔴 Unreachable"
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -196,4 +430,68 @@ async def render_admin_dashboard():
         f"• <b>Stream Extractor API:</b> {api_status}\n"
         f"• <b>Database Engine:</b> {'Neon PostgreSQL' if db.is_postgres else 'SQLite (Local)'}\n"
     )
-    return text, get_admin_dashboard_keyboard()
+    if is_super:
+        text += "👑 <b>Role:</b> Super Administrator\n"
+    return text, get_admin_dashboard_keyboard(is_super_admin=is_super)
+
+
+async def render_users_browser(page: int = 1, search: Optional[str] = None):
+    """Format paginated user list."""
+    page_size = 8
+    users, total = await db.list_users(page=page, page_size=page_size, search=search)
+    total_pages = max(1, math.ceil(total / page_size))
+
+    header = f"👥 <b>Registered Users ({total} total)</b>"
+    if search:
+        header += f" — <i>Filter: '{search}'</i>"
+    header += f"\n📄 Page {page} of {total_pages}\n\nTap a user to manage profile, permissions, and storage channel:"
+
+    kb = get_users_browser_keyboard(users, page, total_pages, search=search)
+    return header, kb
+
+
+def render_user_profile(u: dict):
+    """Format single user inspection card."""
+    chat_id = u.get("chat_id")
+    fname = u.get("first_name") or "User"
+    uname = f"@{u.get('username')}" if u.get("username") else "None"
+    is_admin = u.get("is_admin", False)
+    is_banned = u.get("is_banned", False)
+    channel_id = u.get("channel_id")
+    channel_title = u.get("channel_title") or "None"
+    storage_active = u.get("is_storage_active", False)
+    vault_count = u.get("vault_count", 0)
+    dl_count = u.get("download_count", 0)
+    created_at = str(u.get("created_at", ""))[:19]
+    last_active = str(u.get("last_active", ""))[:19]
+
+    role_str = "👑 Super Admin" if is_super_admin(chat_id) else ("⭐ Admin" if is_admin else "👤 Standard User")
+    status_str = "🔴 BANNED" if is_banned else "🟢 Active"
+
+    channel_status = "🟢 Connected" if (channel_id and storage_active) else ("⚪ Disconnected" if channel_id else "❌ None")
+
+    text = (
+        f"👤 <b>User Profile: {fname}</b>\n\n"
+        f"• <b>Chat ID:</b> <code>{chat_id}</code>\n"
+        f"• <b>Username:</b> {uname}\n"
+        f"• <b>Role:</b> {role_str}\n"
+        f"• <b>Account Status:</b> {status_str}\n\n"
+        f"📁 <b>Storage Channel:</b>\n"
+        f"• <b>Title:</b> {channel_title}\n"
+        f"• <b>ID:</b> <code>{channel_id or 'None'}</code>\n"
+        f"• <b>Status:</b> {channel_status}\n\n"
+        f"📊 <b>Activity & Vault:</b>\n"
+        f"• <b>Stored in Vault:</b> <b>{vault_count}</b> tracks\n"
+        f"• <b>Total Downloads:</b> <b>{dl_count}</b>\n"
+        f"• <b>Registered:</b> {created_at}\n"
+        f"• <b>Last Active:</b> {last_active}\n"
+    )
+
+    kb = get_user_detail_keyboard(
+        user_id=chat_id,
+        is_admin=is_admin,
+        is_banned=is_banned,
+        has_channel=bool(channel_id),
+        vault_count=vault_count
+    )
+    return text, kb

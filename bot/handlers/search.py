@@ -56,6 +56,10 @@ async def execute_search(message: Message, query: str):
     """Perform music catalog search and present interactive track list."""
     user_id = message.from_user.id
 
+    if await db.is_user_banned(user_id):
+        await message.answer("🚫 Your access to Sociobot has been restricted by an administrator.")
+        return
+
     if not await db.check_rate_limit(user_id, "search", max_requests=20, window_secs=60):
         await message.answer("⏳ Please slow down a moment before searching again.")
         return

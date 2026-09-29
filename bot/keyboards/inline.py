@@ -104,14 +104,132 @@ def get_media_delivery_keyboard(
     ])
 
 
-def get_admin_dashboard_keyboard() -> InlineKeyboardMarkup:
+def get_admin_dashboard_keyboard(is_super_admin: bool = False) -> InlineKeyboardMarkup:
     """Interactive control panel for admins."""
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [
             InlineKeyboardButton(text="🧹 Run Cleanup", callback_data="cb:adm_cleanup"),
             InlineKeyboardButton(text="📊 Refresh Stats", callback_data="cb:adm_refresh")
-        ],
-        [
-            InlineKeyboardButton(text="❌ Close Panel", callback_data="cb:close")
         ]
+    ]
+    if is_super_admin:
+        rows.append([
+            InlineKeyboardButton(text="👥 Manage & Browse Users", callback_data="cb:usr_page:1")
+        ])
+    rows.append([
+        InlineKeyboardButton(text="❌ Close Panel", callback_data="cb:close")
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_users_browser_keyboard(
+    users: List[Dict[str, Any]],
+    page: int,
+    total_pages: int,
+    search: Optional[str] = None
+) -> InlineKeyboardMarkup:
+    """Paginated list of users for Super Admin browsing."""
+    buttons = []
+    for u in users:
+        chat_id = u.get("chat_id")
+        fname = u.get("first_name") or "User"
+        uname = f"@{u.get('username')}" if u.get("username") else str(chat_id)
+        vault_count = u.get("vault_count", 0)
+        has_ch = "📁" if u.get("channel_id") else "⚪"
+        badge = "👑 " if u.get("is_admin") else ("🚫 " if u.get("is_banned") else "")
+
+        label = f"{badge}{fname} ({uname}) | {has_ch} {vault_count}"
+        if len(label) > 55:
+            label = label[:52] + "..."
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"cb:usr_view:{chat_id}")])
+
+    # Navigation row
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"cb:usr_page:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{max(1, total_pages)}", callback_data="cb:noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"cb:usr_page:{page + 1}"))
+    buttons.append(nav_row)
+
+    # Action row
+    action_row = [
+        InlineKeyboardButton(text="🔄 Refresh", callback_data=f"cb:usr_page:{page}"),
+        InlineKeyboardButton(text="❌ Close", callback_data="cb:close")
+    ]
+    buttons.append(action_row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_user_detail_keyboard(
+    user_id: int,
+    is_admin: bool,
+    is_banned: bool,
+    has_channel: bool,
+    vault_count: int = 0
+) -> InlineKeyboardMarkup:
+    """Action buttons for inspecting and managing a specific user."""
+    rows = []
+    if vault_count > 0:
+        rows.append([
+            InlineKeyboardButton(text=f"📁 View Stored Vault ({vault_count})", callback_data=f"cb:usr_vault:{user_id}:1")
+        ])
+
+    action_row = []
+    if has_channel:
+        action_row.append(InlineKeyboardButton(text="🔗 Unlink Channel", callback_data=f"cb:usr_unlink:{user_id}"))
+    action_row.append(InlineKeyboardButton(text="💬 Message User", callback_data=f"cb:usr_dm:{user_id}"))
+    rows.append(action_row)
+
+    perm_row = [
+        InlineKeyboardButton(
+            text="👑 Demote Admin" if is_admin else "👑 Make Admin",
+            callback_data=f"cb:usr_toggle_adm:{user_id}"
+        ),
+        InlineKeyboardButton(
+            text="🟢 Unban User" if is_banned else "🚫 Ban User",
+            callback_data=f"cb:usr_toggle_ban:{user_id}"
+        )
+    ]
+    rows.append(perm_row)
+
+    rows.append([
+        InlineKeyboardButton(text="⬅️ Back to Users", callback_data="cb:usr_page:1")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_user_vault_keyboard(
+    user_id: int,
+    tracks: List[Dict[str, Any]],
+    page: int,
+    total_pages: int
+) -> InlineKeyboardMarkup:
+    """Paginated track browser for a user's stored vault."""
+    buttons = []
+    for t in tracks:
+        title = t.get("title") or "Unknown Track"
+        quality = t.get("quality") or "audio"
+        post_url = t.get("channel_post_url")
+        label = f"🎵 {title} ({quality})"
+        if len(label) > 55:
+            label = label[:52] + "..."
+
+        if post_url:
+            buttons.append([InlineKeyboardButton(text=label, url=post_url)])
+        else:
+            buttons.append([InlineKeyboardButton(text=label, callback_data="cb:noop")])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"cb:usr_vault:{user_id}:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{max(1, total_pages)}", callback_data="cb:noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"cb:usr_vault:{user_id}:{page + 1}"))
+    buttons.append(nav_row)
+
+    buttons.append([
+        InlineKeyboardButton(text="⬅️ Back to User Profile", callback_data=f"cb:usr_view:{user_id}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+

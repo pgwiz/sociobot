@@ -65,6 +65,17 @@
    - Audio (`audio_high` 320k, `audio` 192k, `saver` 64k): Checks MP3 header; if MP4/AAC stream, transcodes to pure MP3 via FFmpeg or delivers clean `.m4a`.
    - Video (`720p` HD, `360p` SD): Streams genuine MP4 video with `supports_streaming=True`.
 
+5. **Super Admin User Management Suite:**
+   - Authorization: `SUPER_ADMIN_IDS` in `.env` (comma-separated or single numeric ID, falling back to `ADMIN_CHAT_ID`).
+   - Paginated user directory via `/users` with search (`/users <filter>`).
+   - Deep inspection card via `/user <id_or_username>`.
+   - In-bot management actions:
+     - `[ 📁 View Stored Vault ]`: View all tracks archived in that user's channel.
+     - `[ 🔗 Unlink Channel ]`: Forcefully disconnect a channel and mark stored media unavailable.
+     - `[ 👑 Make/Demote Admin ]`: Promote/demote regular admins.
+     - `[ 🚫 Ban/Unban User ]`: Ban abusive users from using search, download, or bot services.
+     - `/dm <user_id> <msg>`: Send direct administrative communications to a user.
+
 ## Repositories
 - Public: `https://github.com/pgwiz/sociobot.git`
 - Private: `https://github.com/WiPTech/sociobot.git`

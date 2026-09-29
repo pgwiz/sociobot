@@ -138,6 +138,14 @@ async def process_media_request(
     status_message: Optional[Message] = None
 ):
     """Core orchestration for decentralized peer delivery and media archiving."""
+    if await db.is_user_banned(user_id):
+        banned_msg = "🚫 <b>Your access to Sociobot has been restricted by an administrator.</b>"
+        if status_message:
+            await status_message.edit_text(banned_msg, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=reply_to_chat_id, text=banned_msg, parse_mode="HTML")
+        return
+
     bot_info = await bot.get_me()
 
     # 1. Verify user's connected private channel
