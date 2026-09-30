@@ -480,6 +480,142 @@ async def test_video_stream_validation():
     return True
 
 
+async def test_mychannels_and_media_purge():
+    """Verify /mychannels interactive keyboards, URL deep-links, media counts, and 3-step purge."""
+    logger.info("\n─── 9. Testing /mychannels UI & Channel Media Purge ───")
+    from bot.database import Database
+    from bot.config import settings
+    from bot.keyboards.inline import (
+        format_channel_link,
+        get_mychannels_keyboard,
+        get_channel_detail_keyboard,
+        get_channel_delmedia_confirm_keyboard
+    )
+
+    # 1. Test URL Link Formatter
+    assert format_channel_link(-1001234567890) == "https://t.me/c/1234567890/1"
+    assert format_channel_link(-1001234567890, username="my_channel") == "https://t.me/my_channel"
+    assert format_channel_link(-1001234567890, username="@my_channel") == "https://t.me/my_channel"
+    logger.info("✓ format_channel_link correctly handles private (-100...) and public channel links.")
+
+    # 2. Test Keyboards & Callback safety
+    sample_channels = [
+        {"channel_id": -1001111111111, "channel_title": "Primary Vault", "is_primary": True},
+        {"channel_id": -1002222222222, "channel_title": "TikTok Archive", "is_primary": False}
+    ]
+    mych_kb = get_mychannels_keyboard(sample_channels, max_channels=5, bot_username="SocioBot")
+    for row in mych_kb.inline_keyboard:
+        for btn in row:
+            if btn.callback_data:
+                cb_len = len(btn.callback_data.encode("utf-8"))
+                assert cb_len <= 64, f"Callback too long: {btn.callback_data}"
+    logger.info("✓ get_mychannels_keyboard generated and validated within 64-byte limit.")
+
+    detail_kb = get_channel_detail_keyboard(-1001111111111, "https://t.me/c/1111111111/1")
+    assert any(btn.url == "https://t.me/c/1111111111/1" for row in detail_kb.inline_keyboard for btn in row)
+    assert any(btn.callback_data == "cb:mych_unlink:-1001111111111" for row in detail_kb.inline_keyboard for btn in row)
+    assert any(btn.callback_data == "cb:mych_delmedia_1:-1001111111111" for row in detail_kb.inline_keyboard for btn in row)
+    assert any(btn.callback_data == "cb:mych_list" for row in detail_kb.inline_keyboard for btn in row)
+    logger.info("✓ get_channel_detail_keyboard contains visit URL, unlink, delmedia_1, and back buttons.")
+
+    # Test 3-step confirmation keyboards
+    step1_kb = get_channel_delmedia_confirm_keyboard(-1001111111111, step=1)
+    step2_kb = get_channel_delmedia_confirm_keyboard(-1001111111111, step=2)
+    step3_kb = get_channel_delmedia_confirm_keyboard(-1001111111111, step=3)
+
+    assert any(btn.callback_data == "cb:mych_delmedia_2:-1001111111111" for row in step1_kb.inline_keyboard for btn in row)
+    assert any(btn.callback_data == "cb:mych_delmedia_3:-1001111111111" for row in step2_kb.inline_keyboard for btn in row)
+    assert any(btn.callback_data == "cb:mych_delmedia_confirm:-1001111111111" for row in step3_kb.inline_keyboard for btn in row)
+    assert all(any(btn.callback_data == "cb:mych_view:-1001111111111" for row in kb.inline_keyboard for btn in row) for kb in [step1_kb, step2_kb, step3_kb])
+    logger.info("✓ 3-step confirmation keyboards correctly chain: Step 1 -> 2 -> 3 -> Confirm, with Cancel fallback.")
+
+    # 3. Database testing: get_channel_media_count & purge_channel_media
+    test_db_path = "test_mychannels.db"
+    if os.path.exists(test_db_path):
+        os.remove(test_db_path)
+
+    orig_url = settings.DATABASE_URL
+    orig_path = settings.DATABASE_PATH
+    settings.DATABASE_URL = f"sqlite:///{test_db_path}"
+    settings.DATABASE_PATH = test_db_path
+
+    test_db = Database()
+    try:
+        await test_db.connect()
+
+        user_id = 888999
+        ch1 = -1001111
+        ch2 = -1002222
+        await test_db.get_or_create_user(chat_id=user_id, username="purge_tester")
+        await test_db.add_user_channel(user_id, ch1, "Main Vault")
+        await test_db.add_user_channel(user_id, ch2, "Secondary Vault")
+
+        # Initial media count should be 0
+        assert await test_db.get_channel_media_count(user_id, ch1) == 0
+        assert await test_db.get_channel_media_count(user_id, ch2) == 0
+
+        # Insert 3 media items into ch1
+        for msg_id in [10, 11, 12]:
+            await test_db.save_user_media(
+                user_chat_id=user_id,
+                channel_id=ch1,
+                channel_msg_id=msg_id,
+                channel_post_url=f"https://t.me/c/1111/{msg_id}",
+                track_id=f"track_{msg_id}",
+                quality="audio_high",
+                platform="spotify"
+            )
+
+        # Insert 2 media items into ch2
+        for msg_id in [20, 21]:
+            await test_db.save_user_media(
+                user_chat_id=user_id,
+                channel_id=ch2,
+                channel_msg_id=msg_id,
+                channel_post_url=f"https://t.me/c/2222/{msg_id}",
+                track_id=f"track_{msg_id}",
+                quality="360p",
+                platform="tiktok"
+            )
+
+        assert await test_db.get_channel_media_count(user_id, ch1) == 3
+        assert await test_db.get_channel_media_count(user_id, ch2) == 2
+        logger.info("✓ get_channel_media_count correctly reports active items per channel (ch1: 3, ch2: 2).")
+
+        # Purge ch1 media
+        purged_ch1 = await test_db.purge_channel_media(user_id, ch1)
+        assert len(purged_ch1) == 3
+        assert all(cid == ch1 for cid, _ in purged_ch1)
+        assert sorted([mid for _, mid in purged_ch1]) == [10, 11, 12]
+
+        # Verify ch1 count is now 0, and ch2 media remains untouched
+        assert await test_db.get_channel_media_count(user_id, ch1) == 0
+        assert await test_db.get_channel_media_count(user_id, ch2) == 2
+        logger.info("✓ purge_channel_media correctly cleared ch1 records without touching ch2.")
+
+        # Purge ch2
+        purged_ch2 = await test_db.purge_channel_media(user_id, ch2)
+        assert len(purged_ch2) == 2
+        assert await test_db.get_channel_media_count(user_id, ch2) == 0
+
+        # Purge again on empty channel returns []
+        empty_purge = await test_db.purge_channel_media(user_id, ch1)
+        assert empty_purge == []
+        logger.info("✓ Idempotent purge on empty channel returned empty list safely.")
+
+    finally:
+        await test_db.disconnect()
+        settings.DATABASE_URL = orig_url
+        settings.DATABASE_PATH = orig_path
+        if os.path.exists(test_db_path):
+            try:
+                os.remove(test_db_path)
+            except Exception:
+                pass
+
+    return True
+
+
 async def main():
     logger.info("=== Starting Sociobot Verification Suite ===\n")
     api_ok = await test_api_integration()
@@ -490,8 +626,9 @@ async def main():
     multi_ch_ok = await test_multi_channel_and_routing()
     token_ok = await test_track_ref_tokenization()
     video_val_ok = await test_video_stream_validation()
+    mych_ok = await test_mychannels_and_media_purge()
 
-    if api_ok and db_ok and pg_schema_ok and syntax_ok and platform_ok and multi_ch_ok and token_ok and video_val_ok:
+    if api_ok and db_ok and pg_schema_ok and syntax_ok and platform_ok and multi_ch_ok and token_ok and video_val_ok and mych_ok:
         logger.info("\n🎉 ALL SOCIOBOT VERIFICATION TESTS PASSED SUCCESSFULLY!")
         sys.exit(0)
     else:

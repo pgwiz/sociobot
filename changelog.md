@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-09-30
+
+### Added
+- **/mychannels Interactive Channel Hub & 3-Step Media Purge:**
+  - Added `/mychannels` and `/mychanels` (alias) commands rendering connected storage channels as interactive inline buttons.
+  - Channel summary cards displaying Title, ID, Role (Primary vs Secondary), routed platforms, and total stored media item count.
+  - Channel action buttons:
+    - `[ 🔗 Visit Channel ]`: Direct URL deep-link to channel (`https://t.me/<username>` or `https://t.me/c/<clean_id>/1`).
+    - `[ 🗑️ Unlink Channel ]`: Detaches channel and automatically falls back routed platforms to primary channel.
+    - `[ 💥 Delete All Channel Media ]`: Initiates strict 3-step confirmation purge.
+    - `[ ⬅️ Back to Channels ]`: Instant navigation back to channel selection list.
+  - **3-Step Confirmation Purge Flow:**
+    - Step 1 (Confirmation 1/3): Explicit warning regarding deletion from both Telegram and database library.
+    - Step 2 (Confirmation 2/3): Permanent action irreversibility verification.
+    - Step 3 (Confirmation 3/3): Final purge execution authorization.
+    - Purges messages from Telegram channel (`bot.delete_message`) and database (`user_media_storage`), providing final count breakdown.
+  - **Database Helpers:**
+    - `get_channel_media_count(user_chat_id, channel_id)`: Accurate active media count per channel.
+    - `purge_channel_media(user_chat_id, channel_id)`: Deletes channel media records and returns `(channel_id, channel_msg_id)` tuples for physical Telegram message deletion.
+
 ## [2.0.1] - 2026-09-30
 
 ### Fixed

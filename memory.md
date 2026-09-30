@@ -44,7 +44,9 @@
    - If user connects a 2nd+ channel, prompts with the platform routing matrix to assign platforms immediately.
    - Forwarding fallback: Forwarding ANY post from a channel to the bot in PM automatically verifies and links the vault.
    - Interactive dashboard: `/channels` allows designating primary vault, routing platforms, and safe unlinking.
+   - Interactive channel list: `/mychannels` (and `/mychanels`) renders channels as buttons, displaying title, ID, role, routes, media count, direct visit link, unlinking, and 3-step confirmation media purge.
    - Safe unlinking: Removing a channel automatically reassigns all its platform routes to the primary vault.
+   - 3-step media purge: `cb:mych_delmedia_1` -> `cb:mych_delmedia_2` -> `cb:mych_delmedia_3` -> `cb:mych_delmedia_confirm` permanently deletes channel posts from Telegram (`bot.delete_message`) and clears database records (`user_media_storage`).
 
 2. **Multi-Platform Extraction & Platform Routing:**
    - Supports 9 platforms: YouTube, Spotify, TikTok, Instagram, Twitter/X, Reddit, SoundCloud, Bandcamp, Vimeo.

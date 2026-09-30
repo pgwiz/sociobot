@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
         from aiogram.types import BotCommand, BotCommandScopeDefault
         commands = [
             BotCommand(command="start", description="Start bot & setup storage channel"),
+            BotCommand(command="mychannels", description="View & manage your storage channels"),
             BotCommand(command="channels", description="Manage storage channels & platform routes"),
             BotCommand(command="mychannel", description="View your primary storage channel"),
             BotCommand(command="setchannel", description="Link channel manually (-100...)"),

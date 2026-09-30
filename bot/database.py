@@ -1300,6 +1300,61 @@ class Database:
             await self.sqlite_conn.commit()
             return result
 
+    async def get_channel_media_count(self, user_chat_id: int, channel_id: int) -> int:
+        """Return count of active media records stored for a specific user and channel."""
+        if not self.is_connected:
+            return 0
+
+        if self.is_postgres:
+            async def _run(conn):
+                val = await conn.fetchval(
+                    "SELECT COUNT(*) FROM user_media_storage WHERE user_chat_id = $1 AND channel_id = $2 AND is_available = TRUE;",
+                    user_chat_id, channel_id
+                )
+                return int(val or 0)
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute(
+                "SELECT COUNT(*) FROM user_media_storage WHERE user_chat_id = ? AND channel_id = ? AND is_available = 1;",
+                (user_chat_id, channel_id)
+            )
+            row = await cur.fetchone()
+            return int(row[0] or 0) if row else 0
+
+    async def purge_channel_media(self, user_chat_id: int, channel_id: int) -> List[Tuple[int, int]]:
+        """
+        Delete all media records for a specific channel and user from user_media_storage.
+        Returns list of (channel_id, channel_msg_id) tuples for physical Telegram deletion.
+        """
+        if not self.is_connected:
+            return []
+
+        if self.is_postgres:
+            async def _run(conn):
+                rows = await conn.fetch(
+                    """
+                    DELETE FROM user_media_storage
+                    WHERE user_chat_id = $1 AND channel_id = $2
+                    RETURNING channel_id, channel_msg_id;
+                    """,
+                    user_chat_id, channel_id
+                )
+                return [(int(r["channel_id"]), int(r["channel_msg_id"])) for r in rows]
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute(
+                "SELECT channel_id, channel_msg_id FROM user_media_storage WHERE user_chat_id = ? AND channel_id = ?;",
+                (user_chat_id, channel_id)
+            )
+            rows = await cur.fetchall()
+            result = [(int(r[0]), int(r[1])) for r in rows]
+            await self.sqlite_conn.execute(
+                "DELETE FROM user_media_storage WHERE user_chat_id = ? AND channel_id = ?;",
+                (user_chat_id, channel_id)
+            )
+            await self.sqlite_conn.commit()
+            return result
+
     # ── Track Metadata Cache ──────────────────────────────────────────────
 
     async def save_track_metadata(

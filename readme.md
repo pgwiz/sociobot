@@ -58,6 +58,7 @@ Instead of relying on a centralized bot-owned dump channel, users link their own
 | `/start` | Welcome greeting, channel status check, and setup guide. |
 | `/help` | Complete command usage reference. |
 | `/channels` | Interactive multi-channel storage vault and platform routing dashboard. |
+| `/mychannels` | Interactive channels button list with channel summary, direct visit link, unlinking, and 3-step media purge. |
 | `/mychannel` | Inspect currently linked primary channel status and ID. |
 | `/setchannel <id>` | Manually link a channel by ID (e.g. `-100...`) or by forwarding a message. |
 | `/search <query>` | Search Spotify/YouTube catalog with 1-click download buttons. |

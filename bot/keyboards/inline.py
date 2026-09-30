@@ -390,3 +390,88 @@ def get_user_vault_keyboard(
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
+def format_channel_link(channel_id: int, username: Optional[str] = None) -> str:
+    """Format deep link to open channel in Telegram."""
+    if username:
+        return f"https://t.me/{username.lstrip('@')}"
+    cid_str = str(channel_id)
+    if cid_str.startswith("-100"):
+        clean_cid = cid_str[4:]
+    elif cid_str.startswith("-"):
+        clean_cid = cid_str[1:]
+    else:
+        clean_cid = cid_str
+    return f"https://t.me/c/{clean_cid}/1"
+
+
+def get_mychannels_keyboard(
+    channels: List[Dict[str, Any]],
+    max_channels: int = 5,
+    bot_username: Optional[str] = None
+) -> InlineKeyboardMarkup:
+    """Channel selection keyboard for /mychannels interactive list."""
+    rows = []
+    for ch in channels:
+        cid = ch["channel_id"]
+        title = ch.get("channel_title") or f"Channel {cid}"
+        star = "🌟 " if ch.get("is_primary") else "📁 "
+        btn_text = f"{star}{title[:28]}"
+        rows.append([
+            InlineKeyboardButton(text=btn_text, callback_data=f"cb:mych_view:{cid}")
+        ])
+
+    if len(channels) < max_channels and bot_username:
+        rows.append([
+            InlineKeyboardButton(
+                text="➕ Link New Channel",
+                url=f"https://t.me/{bot_username}?startchannel=sociobot&admin=post_messages+edit_messages+delete_messages"
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="🔄 Refresh", callback_data="cb:mych_refresh"),
+        InlineKeyboardButton(text="❌ Close", callback_data="cb:close")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_channel_detail_keyboard(
+    channel_id: int,
+    channel_url: str
+) -> InlineKeyboardMarkup:
+    """Action buttons for an individual storage channel summary."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔗 Visit Channel", url=channel_url)
+        ],
+        [
+            InlineKeyboardButton(text="🗑️ Unlink Channel", callback_data=f"cb:mych_unlink:{channel_id}"),
+            InlineKeyboardButton(text="💥 Delete All Channel Media", callback_data=f"cb:mych_delmedia_1:{channel_id}")
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Back to Channels", callback_data="cb:mych_list")
+        ]
+    ])
+
+
+def get_channel_delmedia_confirm_keyboard(
+    channel_id: int,
+    step: int
+) -> InlineKeyboardMarkup:
+    """3-step confirmation keyboard for purging channel media."""
+    if step == 1:
+        proceed_btn = InlineKeyboardButton(text="⚠️ Proceed (1/3)", callback_data=f"cb:mych_delmedia_2:{channel_id}")
+    elif step == 2:
+        proceed_btn = InlineKeyboardButton(text="🚨 Yes, Continue (2/3)", callback_data=f"cb:mych_delmedia_3:{channel_id}")
+    else:
+        proceed_btn = InlineKeyboardButton(text="🔥 PURGE ALL MEDIA NOW (3/3)", callback_data=f"cb:mych_delmedia_confirm:{channel_id}")
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            proceed_btn,
+            InlineKeyboardButton(text="❌ Cancel", callback_data=f"cb:mych_view:{channel_id}")
+        ]
+    ])
+
+
