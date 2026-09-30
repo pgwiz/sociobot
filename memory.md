@@ -31,11 +31,13 @@
      - Graceful Shutdown Latch: `self._is_shutting_down` latch prevents keepalive pings or closing queries from touching a closing pool; pool disconnect is bounded with a 3.0s timeout falling back to `terminate()`.
    - SQLite Fallback: Activated when `DATABASE_URL` is unconfigured or starts with `sqlite:///`, using `aiosqlite` with WAL mode.
 
-3. **Render Deployment & WSGI Compatibility:**
-   - Entrypoints: `wsgi.py` and `your_application/wsgi.py` wrap the FastAPI app in `a2wsgi.ASGIMiddleware(app)`.
-   - Runs cleanly under Render's default command: `gunicorn your_application.wsgi` or standard `uvicorn bot.main:app`.
+3. **Render Deployment & Lifespan Architecture:**
+   - Primary CLI Startup: `python -m bot.main` (or `uvicorn bot.main:app --host 0.0.0.0 --port $PORT`).
+   - Sociobot automatically reads `$PORT` from environment (Render dynamically assigns this, e.g. `10000` or `8080`) and binds Uvicorn to `0.0.0.0:$PORT`.
+   - WSGI Fallback: `wsgi.py` and `your_application/wsgi.py` wrap the FastAPI app in `a2wsgi.ASGIMiddleware(app)` for legacy Gunicorn environments.
    - Aiogram polling runs as a background task within FastAPI lifespan with `/` and `/health` HTTP endpoints responding for Render health checks.
    - Lifecycle: Lifespan manager triggers `dp.stop_polling()` followed by bot session, API client, and DB pool termination for 100% clean shutdown on container restarts without orphaned connections or unclosed session warnings.
+   - Config template: `.env.example` provides copy-pasteable environment variables for cloud deployments.
 
 ## Decentralized Storage & Multi-Node Schema
 1. **Multi-Channel Onboarding & Vault Flow:**

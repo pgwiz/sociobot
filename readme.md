@@ -92,28 +92,45 @@ Instead of relying on a centralized bot-owned dump channel, users link their own
 
 ## 🚀 Deployment Guide (Render Web Service)
 
-Sociobot is pre-configured for seamless 24/7 hosting on [Render](https://render.com) as a Web Service.
+Sociobot is pre-configured for seamless 24/7 cloud hosting on platforms like [Render](https://render.com), Railway, or Fly.io as a Web Service.
 
 ### 1. Create a Web Service on Render
-- Connect your GitHub repository (`https://github.com/pgwiz/sociobot` or your private `WiPTech/sociobot`).
+- Connect your GitHub repository (`https://github.com/pgwiz/sociobot` or private `WiPTech/sociobot`).
 - **Runtime:** `Python 3`
 - **Build Command:** `pip install -r requirements.txt`
-- **Start Command:** `gunicorn your_application.wsgi` (or `uvicorn bot.main:app --host 0.0.0.0 --port 10000`)
+- **Start Command:** `python -m bot.main`
 - **Health Check Path:** `/health`
 
-### 2. Required Environment Variables on Render
-Add the following in the Render **Environment** dashboard:
+### 2. How the Uvicorn & Platform Startup Procedure Works
+Sociobot combines an HTTP web server and an asynchronous Telegram bot into a single unified process via **FastAPI Lifespan** managed by **Uvicorn**:
+1. **Dynamic Port Binding:** When starting with `python -m bot.main`, Sociobot automatically inspects the environment for `PORT` (which Render assigns dynamically, e.g. `10000` or `8080`) and binds Uvicorn to `0.0.0.0:$PORT`.
+2. **Environment Variable Loading:** Config values are read directly from Render's Environment settings (or `.env` file locally).
+3. **Lifespan Startup Sequence:**
+   - Connects to Neon PostgreSQL (or SQLite) and runs automatic schema migrations on the isolated schema (default `sociobot`).
+   - Initializes the Aiogram 3 bot and syncs the Telegram command menu.
+   - Launches Telegram bot polling (`dp.start_polling`) concurrently as a background task inside the async event loop.
+4. **Health Verification:** Uvicorn immediately begins serving `GET /` and `GET /health` with HTTP 200 OK responses, allowing Render's load balancer to verify the service is healthy and mark the deployment live.
+5. **Graceful Shutdown:** When Render restarts or redeploys the container, the FastAPI lifespan executes a clean shutdown: it stops Telegram polling, cancels background tasks, and drains database connection pools without connection leaks.
+
+> [!NOTE]
+> You can also start the server using Uvicorn directly if preferred:
+> ```bash
+> uvicorn bot.main:app --host 0.0.0.0 --port $PORT
+> ```
+
+### 3. Required Environment Variables on Render
+Add the following in the Render **Environment** dashboard (reference `.env.example` for details):
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather *(Required)* | `8126033137:AAFl...` |
-| `SUPER_ADMIN_IDS` | Your Telegram User ID *(Required for Super Admin)* | `69594164` |
-| `ADMIN_CHAT_ID` | Primary admin Telegram ID | `69594164` |
-| `DATABASE_URL` | Neon Serverless PostgreSQL connection string | `postgresql://user:pass@ep-xyz-pooler.tech/db?sslmode=require` |
-| `DB_SCHEMA` | Custom PostgreSQL schema name for table isolation (default: `sociobot`) | `sociobot` |
-| `ENABLE_NEON_KEEPALIVE` | Ping Neon every 4 min to keep compute awake | `true` |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather *(Required)* | `7391859147:AAEWboEBCY0lA7ZOsjRrSMwHrHq7y4-IQAY` |
+| `ADMIN_CHAT_ID` | Primary admin Telegram numeric ID | `6684660360` |
+| `SUPER_ADMIN_IDS` | Comma-separated Super Admin IDs | `6684660360` |
+| `DATABASE_URL` | Neon Serverless PostgreSQL connection string | `postgresql://user:pass@ep-xyz-pooler.tech/neondb?sslmode=require` |
+| `DB_SCHEMA` | Custom schema name for table isolation (default: `sociobot`) | `sociobot` |
+| `ENABLE_NEON_KEEPALIVE` | Ping Neon every 4 min to keep serverless compute awake | `true` |
 | `YTSP_API_BASE_URL` | Stream Extractor API base URL | `https://ytsp-api.pgwiz.cloud` |
-| `PORT` | Set automatically by Render | `10000` |
+| `PORT` | Dynamic port provided automatically by Render | `8080` (or `10000`) |
 
 > [!TIP]
 > **Why Neon PostgreSQL is recommended for Render:**

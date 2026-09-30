@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-09-30
+
+### Added
+- **Environment Example File (`.env.example`):**
+  - Added clean, copy-pasteable `.env.example` with complete configuration settings for Telegram tokens, Super Admin IDs, Neon PostgreSQL, isolated schema, connection pool parameters, quotas, and cloud hosting ports.
+- **Render & Uvicorn Cloud Deployment Guide:**
+  - Documented the `python -m bot.main` startup procedure and dynamic `$PORT` binding for Render and cloud platforms.
+  - Detailed the FastAPI Lifespan architecture running Uvicorn HTTP endpoints (`/`, `/health`) and Aiogram 3 background Telegram polling concurrently with zero connection leaks.
+
+### Changed
+- **Repository Cleanliness:**
+  - Removed `agent.md` from git tracking and history, added `agent.md` to `.gitignore`.
+
 ## [2.0.2] - 2026-09-30
 
 ### Added
