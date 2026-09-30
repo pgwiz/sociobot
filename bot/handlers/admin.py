@@ -26,7 +26,8 @@ from bot.keyboards.inline import (
     get_admin_dashboard_keyboard,
     get_users_browser_keyboard,
     get_user_detail_keyboard,
-    get_user_vault_keyboard
+    get_user_vault_keyboard,
+    get_quota_upgrade_keyboard
 )
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,82 @@ async def cb_user_unlink(callback: CallbackQuery):
     await callback.answer("Channel disconnected for this user.", show_alert=True)
 
     # Refresh profile card
+    user_data = await db.get_user_details(target_id)
+    if user_data:
+        text, kb = render_user_profile(user_data)
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("cb:adm_unlink_ch:"))
+async def cb_admin_unlink_channel(callback: CallbackQuery):
+    """Super Admin forcefully disconnects a specific storage channel for a user."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    channel_id = int(parts[3])
+
+    await db.force_unlink_user_channel(target_id, channel_id=channel_id)
+    await callback.answer(f"Channel {channel_id} unlinked.", show_alert=True)
+
+    user_data = await db.get_user_details(target_id)
+    if user_data:
+        text, kb = render_user_profile(user_data)
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("cb:adm_quota_menu:"))
+async def cb_admin_quota_menu(callback: CallbackQuery):
+    """Show quota upgrade options for a user."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    target_id = int(callback.data.split(":")[2])
+    user_data = await db.get_user_details(target_id)
+    if not user_data:
+        await callback.answer("User not found.", show_alert=True)
+        return
+
+    current_max = user_data.get("max_channels", 5)
+    fname = user_data.get("first_name", "User")
+
+    kb = get_quota_upgrade_keyboard(target_id)
+    text = (
+        f"💎 <b>Upgrade Channel Quota for {fname}</b>\n\n"
+        f"• Current Quota: <b>{current_max} channels</b>\n"
+        f"• Active Channels: <b>{len(user_data.get('channels', []))} channels</b>\n\n"
+        "Select new maximum channel limit:"
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cb:adm_set_quota:"))
+async def cb_admin_set_quota(callback: CallbackQuery):
+    """Set channel quota for a user."""
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    new_quota = int(parts[3])
+
+    await db.upgrade_user_quota(target_id, new_quota)
+    await callback.answer(f"Channel quota set to {new_quota}!", show_alert=True)
+
     user_data = await db.get_user_details(target_id)
     if user_data:
         text, kb = render_user_profile(user_data)
@@ -450,6 +527,9 @@ async def render_users_browser(page: int = 1, search: Optional[str] = None):
     return header, kb
 
 
+from bot.utils.platform import get_platform_display_name, get_platform_icon
+
+
 def render_user_profile(u: dict):
     """Format single user inspection card."""
     chat_id = u.get("chat_id")
@@ -459,7 +539,9 @@ def render_user_profile(u: dict):
     is_banned = u.get("is_banned", False)
     channel_id = u.get("channel_id")
     channel_title = u.get("channel_title") or "None"
-    storage_active = u.get("is_storage_active", False)
+    channels = u.get("channels") or []
+    routes = u.get("routes") or {}
+    max_channels = int(u.get("max_channels") or 5)
     vault_count = u.get("vault_count", 0)
     dl_count = u.get("download_count", 0)
     created_at = str(u.get("created_at", ""))[:19]
@@ -468,7 +550,25 @@ def render_user_profile(u: dict):
     role_str = "👑 Super Admin" if is_super_admin(chat_id) else ("⭐ Admin" if is_admin else "👤 Standard User")
     status_str = "🔴 BANNED" if is_banned else "🟢 Active"
 
-    channel_status = "🟢 Connected" if (channel_id and storage_active) else ("⚪ Disconnected" if channel_id else "❌ None")
+    channels_text = []
+    if channels:
+        for ch in channels:
+            cid = ch["channel_id"]
+            title = ch.get("channel_title") or f"Vault {cid}"
+            star = "🌟 (Primary) " if ch.get("is_primary") else ""
+            assigned = [
+                f"{get_platform_icon(p)} {get_platform_display_name(p)}"
+                for p, t_cid in routes.items()
+                if t_cid == cid
+            ]
+            route_str = f"\n   ↳ <i>Routes:</i> {', '.join(assigned)}" if assigned else ""
+            channels_text.append(f"• {star}<b>{title}</b> (<code>{cid}</code>){route_str}")
+    elif channel_id:
+        channels_text.append(f"• <b>{channel_title}</b> (<code>{channel_id}</code>)")
+    else:
+        channels_text.append("• <i>No channels connected</i>")
+
+    channels_block = "\n".join(channels_text)
 
     text = (
         f"👤 <b>User Profile: {fname}</b>\n\n"
@@ -476,10 +576,8 @@ def render_user_profile(u: dict):
         f"• <b>Username:</b> {uname}\n"
         f"• <b>Role:</b> {role_str}\n"
         f"• <b>Account Status:</b> {status_str}\n\n"
-        f"📁 <b>Storage Channel:</b>\n"
-        f"• <b>Title:</b> {channel_title}\n"
-        f"• <b>ID:</b> <code>{channel_id or 'None'}</code>\n"
-        f"• <b>Status:</b> {channel_status}\n\n"
+        f"📁 <b>Connected Vaults ({len(channels)}/{max_channels}):</b>\n"
+        f"{channels_block}\n\n"
         f"📊 <b>Activity & Vault:</b>\n"
         f"• <b>Stored in Vault:</b> <b>{vault_count}</b> tracks\n"
         f"• <b>Total Downloads:</b> <b>{dl_count}</b>\n"
@@ -491,7 +589,9 @@ def render_user_profile(u: dict):
         user_id=chat_id,
         is_admin=is_admin,
         is_banned=is_banned,
-        has_channel=bool(channel_id),
-        vault_count=vault_count
+        has_channel=bool(channel_id or channels),
+        vault_count=vault_count,
+        channels=channels,
+        max_channels=max_channels
     )
     return text, kb

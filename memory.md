@@ -38,25 +38,34 @@
    - Lifecycle: Lifespan manager triggers `dp.stop_polling()` followed by bot session, API client, and DB pool termination for 100% clean shutdown on container restarts without orphaned connections or unclosed session warnings.
 
 ## Decentralized Storage & Multi-Node Schema
-1. **Channel Onboarding Flow:**
+1. **Multi-Channel Onboarding & Vault Flow:**
    - Auto-detection: Intercepts `my_chat_member` (`ChatMemberUpdated`) with `allowed_updates` when the bot is promoted to administrator in a user's channel, supergroup, or group.
-   - Saves channel ID and title to `users` table.
-   - Posts confirmation message directly in the channel with a 1-tap `[ 🎧 Open Sociobot in PM ]` deep-link button.
-   - Also sends polite onboarding notice in user's PM if already started:
-     > *"✅ Channel linked! Your media is safely archived here for your full control. To keep downloads lightning-fast, audio may also be shared anonymously across the community network."*
-     with a `[ Let's Go 🚀 ]` confirmation button.
+   - Enforces channel quota (`max_channels`, default 5). First channel automatically becomes Primary (`is_primary = TRUE`).
+   - If user connects a 2nd+ channel, prompts with the platform routing matrix to assign platforms immediately.
    - Forwarding fallback: Forwarding ANY post from a channel to the bot in PM automatically verifies and links the vault.
-   - Manual fallback: `/setchannel <channel_id|@username|link>` and `/mychannel`.
+   - Interactive dashboard: `/channels` allows designating primary vault, routing platforms, and safe unlinking.
+   - Safe unlinking: Removing a channel automatically reassigns all its platform routes to the primary vault.
 
-2. **Multi-Node Database Tables:**
-   - `users`: User metadata, connected `channel_id`, `channel_title`, `is_storage_active`, `terms_accepted`, and admin status.
-   - `user_media_storage`: Keyed by `(user_chat_id, track_id, quality)`, stores `channel_id`, `channel_msg_id`, `channel_post_url`, `telegram_file_id`, and `is_available`.
+2. **Multi-Platform Extraction & Platform Routing:**
+   - Supports 9 platforms: YouTube, Spotify, TikTok, Instagram, Twitter/X, Reddit, SoundCloud, Bandcamp, Vimeo.
+   - `bot.utils.platform`: Strict domain-delimited regex pattern detector avoiding false positives (e.g., `reddit.com` vs `t.co`).
+   - Quality presets:
+     - Social videos (`tiktok`, `instagram`, `twitter`, `reddit`): Download in lowest quality (`saver` MP4) to preserve bandwidth, with an attached `[ 🎵 Extract Audio ]` button.
+     - Music platforms (`spotify`, `soundcloud`, `bandcamp`): Default to ID3-tagged 320k MP3 (`audio_high`).
+     - Videos (`youtube`, `vimeo`): Present format selector or default to user preference.
+   - Dynamic Link Picker: If an unrouted link arrives for a user with >1 vaults, Sociobot displays an inline channel picker, saves the destination route, and downloads the media.
+
+3. **Multi-Node Database Tables:**
+   - `users`: User metadata, `channel_id` (legacy pointer), `channel_title`, `max_channels` (default 5), `is_storage_active`, `terms_accepted`, and admin status.
+   - `user_channels`: Keyed by `(user_chat_id, channel_id)`, stores `channel_title`, `is_primary`, `is_active`, `created_at`.
+   - `user_platform_routes`: Keyed by `(user_chat_id, platform)`, stores `channel_id`, `updated_at`.
+   - `user_media_storage`: Keyed by `(user_chat_id, track_id, quality)`, stores `channel_id`, `channel_msg_id`, `channel_post_url`, `telegram_file_id`, `platform`, `destination_channel_id`, and `is_available`.
    - `tracks`: Global metadata registry (`title`, `artist`, `duration_secs`, `thumbnail_url`, `source`).
    - `api_cache`: Persistent JSON cache for metadata (7-day TTL) and search results (24-hour TTL).
    - `download_history`: User download logs.
    - `rate_limits`: Per-user rate limiting.
 
-3. **Replication & Delivery Engine:**
+4. **Replication & Delivery Engine:**
    - When User B requests a track already cached in User A's channel:
      - Bot executes `bot.copy_message(user_b_channel, user_a_channel, msg_id)`.
      - User B receives their own permanent copy in their channel.
@@ -64,20 +73,22 @@
      - If User A ever removes the bot or deletes their copy, User B's copy remains alive, and the network routes through surviving nodes.
    - Attached action buttons on delivered media:
      - `[ 📂 Open in Channel ]` — Direct link (`https://t.me/c/<clean_id>/<msg_id>`).
+     - `[ 🎵 Extract Audio ]` — 1-tap conversion of social video to MP3 (only shown for video formats).
      - `[ 🗑️ Delete ]` — Deletes post from user's channel and soft-deletes DB record.
      - `[ ⚡ Force Re-download ]` — Bypasses cache and extracts fresh.
 
-4. **Audio & Video Packaging:**
+5. **Audio & Video Packaging:**
    - Audio (`audio_high` 320k, `audio` 192k, `saver` 64k): Checks MP3 header; if MP4/AAC stream, transcodes to pure MP3 via FFmpeg or delivers clean `.m4a`.
-   - Video (`720p` HD, `360p` SD): Streams genuine MP4 video with `supports_streaming=True`.
+   - Video (`720p` HD, `360p` SD, `saver` lowest): Streams genuine MP4 video with `supports_streaming=True`.
 
-5. **Super Admin User Management Suite:**
+6. **Super Admin User Management Suite:**
    - Authorization: `SUPER_ADMIN_IDS` in `.env` (comma-separated or single numeric ID, falling back to `ADMIN_CHAT_ID`).
    - Paginated user directory via `/users` with search (`/users <filter>`).
-   - Deep inspection card via `/user <id_or_username>`.
+   - Deep inspection card via `/user <id_or_username>` showing all connected channels, platform routes, and quota.
    - In-bot management actions:
      - `[ 📁 View Stored Vault ]`: View all tracks archived in that user's channel.
-     - `[ 🔗 Unlink Channel ]`: Forcefully disconnect a channel and mark stored media unavailable.
+     - `[ 🗑️ Unlink: <channel> ]`: Forcefully disconnect a specific channel and mark its media unavailable.
+     - `[ 💎 Upgrade Quota ]`: Set user maximum channels (5, 10, 20, or 100/Unlimited).
      - `[ 👑 Make/Demote Admin ]`: Promote/demote regular admins.
      - `[ 🚫 Ban/Unban User ]`: Ban abusive users from using search, download, or bot services.
      - `/dm <user_id> <msg>`: Send direct administrative communications to a user.

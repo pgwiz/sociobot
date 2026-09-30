@@ -21,7 +21,8 @@ from bot.config import settings
 from bot.database import db
 from bot.keyboards.inline import (
     get_onboarding_keyboard,
-    get_channel_setup_keyboard
+    get_channel_setup_keyboard,
+    get_platform_route_keyboard
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,27 @@ async def on_channel_admin_update(event: ChatMemberUpdated, bot: Bot):
 
     # Check if promoted to administrator in a channel, supergroup, or group
     if chat.type in (ChatType.CHANNEL, ChatType.SUPERGROUP, ChatType.GROUP) and new_status == ChatMemberStatus.ADMINISTRATOR:
+        # Check quota
+        channels = await db.get_user_channels(user_id)
+        max_channels = await db.get_user_max_channels(user_id)
+        already_linked = any(c["channel_id"] == channel_id for c in channels)
+
+        if not already_linked and len(channels) >= max_channels:
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⚠️ <b>Channel Quota Reached ({len(channels)}/{max_channels})</b>\n\n"
+                        f"You have reached your limit of {max_channels} connected storage channels.\n\n"
+                        f"To link more channels, please ask a Super Admin to upgrade your quota, "
+                        f"or unlink an existing channel with /channels."
+                    ),
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            return
+
         # Register or update user record and link channel
         await db.get_or_create_user(
             chat_id=user_id,
@@ -57,7 +79,7 @@ async def on_channel_admin_update(event: ChatMemberUpdated, bot: Bot):
             first_name=from_user.first_name,
             is_admin=(user_id == settings.ADMIN_CHAT_ID)
         )
-        await db.link_user_channel(user_id, channel_id, channel_title)
+        await db.add_user_channel(user_id, channel_id, channel_title)
         logger.info(f"Successfully linked {chat.type} {channel_id} ('{channel_title}') to user {user_id}")
 
         bot_info = await bot.get_me()
@@ -84,22 +106,36 @@ async def on_channel_admin_update(event: ChatMemberUpdated, bot: Bot):
         except Exception as e:
             logger.warning(f"Could not post confirmation to channel {channel_id}: {e}")
 
-        # 2. Also send polite onboarding confirmation to the user in their PM
-        polite_text = (
-            f"🎉 <b>Storage Channel Linked!</b>\n\n"
-            f"Connected: <b>{channel_title}</b> (<code>{channel_id}</code>)\n\n"
-            f"✅ <i>Your media is safely archived here for your full control. "
-            f"To keep downloads lightning-fast, audio may also be shared anonymously across the community network.</i>"
-        )
+        # 2. Also send onboarding confirmation to the user in their PM
         try:
-            await bot.send_message(
-                chat_id=user_id,
-                text=polite_text,
-                parse_mode="HTML",
-                reply_markup=get_onboarding_keyboard()
-            )
+            if len(channels) >= 1 and not already_linked:
+                # User now has multiple channels -> offer platform routing
+                routes = await db.get_all_platform_routes(user_id)
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"🎉 <b>New Vault Connected: {channel_title}</b>\n\n"
+                        f"You now have <b>{len(channels) + 1}</b> storage vaults.\n"
+                        f"Which platforms should be saved to this channel?"
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=get_platform_route_keyboard(channel_id, user_id, routes)
+                )
+            else:
+                polite_text = (
+                    f"🎉 <b>Storage Channel Linked!</b>\n\n"
+                    f"Connected: <b>{channel_title}</b> (<code>{channel_id}</code>)\n\n"
+                    f"✅ <i>Your media is safely archived here for your full control. "
+                    f"To keep downloads lightning-fast, audio may also be shared anonymously across the community network.</i>"
+                )
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=polite_text,
+                    parse_mode="HTML",
+                    reply_markup=get_onboarding_keyboard()
+                )
         except Exception as e:
-            logger.info(f"User {user_id} hasn't started bot in PM yet: {e}")
+            logger.info(f"User {user_id} notification failed: {e}")
 
     # Check if bot was added as ordinary member in a group, guide user to promote it
     elif chat.type in (ChatType.SUPERGROUP, ChatType.GROUP) and new_status == ChatMemberStatus.MEMBER:
@@ -131,28 +167,32 @@ async def cmd_start(message: Message, bot: Bot):
     await db.get_or_create_user(user.id, user.username, user.first_name, is_admin=is_admin)
 
     channel_info = await db.get_user_channel(user.id)
+    channels = await db.get_user_channels(user.id)
     bot_info = await bot.get_me()
 
     if channel_info and channel_info.get("channel_id") and channel_info.get("is_storage_active"):
+        ch_count = len(channels)
         welcome_text = (
             f"👋 Hello, <b>{user.first_name}</b>!\n\n"
-            f"Your personal storage channel is connected: <b>{channel_info.get('channel_title', 'Private Channel')}</b>.\n\n"
+            f"Your personal storage vault is connected: <b>{channel_info.get('channel_title', 'Private Channel')}</b>.\n"
+            f"Total vaults linked: <b>{ch_count}</b>.\n\n"
             f"🎧 <b>How to use:</b>\n"
             f"• Send any <b>song name</b> or artist to search.\n"
-            f"• Paste a <b>Spotify</b> or <b>YouTube</b> link to download directly.\n"
-            f"• Use /mychannel to manage your connected channel.\n\n"
-            f"⚡ <i>All media is stored in your private channel with full delete control.</i>"
+            f"• Paste a <b>Spotify</b>, <b>YouTube</b>, <b>TikTok</b>, <b>Instagram</b>, or other media link.\n"
+            f"• Use /channels to manage storage channels & customize platform routes.\n\n"
+            f"⚡ <i>All media is stored in your private channels with full delete control.</i>"
         )
         await message.answer(welcome_text, parse_mode="HTML")
     else:
         welcome_text = (
             f"👋 Welcome to <b>Sociobot</b>, <b>{user.first_name}</b>!\n\n"
-            f"Sociobot is a decentralized media player where <b>you</b> own your library. "
-            f"Media is stored directly in your own private Telegram channel.\n\n"
+            f"Sociobot is a decentralized multi-platform media player where <b>you</b> own your library. "
+            f"Media is stored directly in your own private Telegram channel(s).\n\n"
             f"📌 <b>Quick Setup (takes 10 seconds):</b>\n"
             f"1. Create a private channel in Telegram (e.g. <i>My Music Vault</i>).\n"
             f"2. Add @{bot_info.username} as an <b>Administrator</b> with post permissions.\n"
-            f"3. Sociobot will automatically detect and link your channel!"
+            f"3. Sociobot will automatically detect and link your channel!\n\n"
+            f"💡 You can connect up to 5 storage channels and route different platforms to different channels!"
         )
         await message.answer(
             welcome_text,
@@ -165,22 +205,24 @@ async def cmd_start(message: Message, bot: Bot):
 async def cmd_mychannel(message: Message, bot: Bot):
     """Inspect currently linked storage channel."""
     user_id = message.from_user.id
-    channel_info = await db.get_user_channel(user_id)
+    channels = await db.get_user_channels(user_id)
     bot_info = await bot.get_me()
 
-    if channel_info and channel_info.get("channel_id"):
-        cid = channel_info["channel_id"]
-        title = channel_info.get("channel_title", "Private Channel")
-        active = channel_info.get("is_storage_active", True)
+    if channels:
+        primary = next((c for c in channels if c.get("is_primary")), channels[0])
+        cid = primary["channel_id"]
+        title = primary.get("channel_title", "Private Channel")
+        active = primary.get("is_active", True)
         status_text = "🟢 Active" if active else "🔴 Inactive / Disconnected"
 
         text = (
-            f"📁 <b>Your Connected Storage Channel</b>\n\n"
+            f"📁 <b>Your Primary Storage Channel</b>\n\n"
             f"• <b>Title:</b> {title}\n"
             f"• <b>Channel ID:</b> <code>{cid}</code>\n"
-            f"• <b>Status:</b> {status_text}\n\n"
-            f"💡 To switch to another channel, simply add @{bot_info.username} as admin to the new channel, "
-            f"or forward any post from it here with <code>/setchannel</code>."
+            f"• <b>Status:</b> {status_text}\n"
+            f"• <b>Total Channels Linked:</b> <b>{len(channels)}</b>\n\n"
+            f"💡 <i>Tip: Use <code>/channels</code> to view all your storage vaults, route platforms, "
+            f"or unlink channels.</i>"
         )
         await message.answer(text, parse_mode="HTML")
     else:
@@ -241,21 +283,44 @@ async def on_forwarded_channel_message(message: Message, bot: Bot):
             return
 
         # Bot is confirmed administrator in this channel
+        channels = await db.get_user_channels(user_id)
+        max_channels = await db.get_user_max_channels(user_id)
+        already_linked = any(c["channel_id"] == channel_id for c in channels)
+
+        if not already_linked and len(channels) >= max_channels:
+            await message.answer(
+                f"⚠️ <b>Channel Quota Reached ({len(channels)}/{max_channels})</b>\n\n"
+                f"You have reached your limit of {max_channels} connected storage channels. "
+                f"Manage your channels with /channels.",
+                parse_mode="HTML"
+            )
+            return
+
         await db.get_or_create_user(
             chat_id=user_id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
             is_admin=(user_id == settings.ADMIN_CHAT_ID)
         )
-        await db.link_user_channel(user_id, channel_id, channel_title)
+        await db.add_user_channel(user_id, channel_id, channel_title)
 
-        await message.answer(
-            f"🎉 <b>Storage Vault Connected!</b>\n\n"
-            f"Connected: <b>{channel_title}</b> (<code>{channel_id}</code>)\n\n"
-            f"✅ All music & videos you download will be automatically archived here with instant delete control.",
-            parse_mode="HTML",
-            reply_markup=get_onboarding_keyboard()
-        )
+        if len(channels) >= 1 and not already_linked:
+            routes = await db.get_all_platform_routes(user_id)
+            await message.answer(
+                f"🎉 <b>New Vault Connected: {channel_title}</b>\n\n"
+                f"You now have <b>{len(channels) + 1}</b> storage vaults.\n"
+                f"Which platforms should be saved to this channel?",
+                parse_mode="HTML",
+                reply_markup=get_platform_route_keyboard(channel_id, user_id, routes)
+            )
+        else:
+            await message.answer(
+                f"🎉 <b>Storage Vault Connected!</b>\n\n"
+                f"Connected: <b>{channel_title}</b> (<code>{channel_id}</code>)\n\n"
+                f"✅ All music & videos you download will be automatically archived here with instant delete control.",
+                parse_mode="HTML",
+                reply_markup=get_onboarding_keyboard()
+            )
     except Exception as e:
         logger.warning(f"Could not verify channel {channel_id} from forwarded message: {e}")
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -355,19 +420,45 @@ async def cmd_setchannel(message: Message, bot: Bot):
             return
 
         channel_title = chat.title or "Private Storage Channel"
+        channel_id = chat.id
+
+        channels = await db.get_user_channels(user_id)
+        max_channels = await db.get_user_max_channels(user_id)
+        already_linked = any(c["channel_id"] == channel_id for c in channels)
+
+        if not already_linked and len(channels) >= max_channels:
+            await message.answer(
+                f"⚠️ <b>Channel Quota Reached ({len(channels)}/{max_channels})</b>\n\n"
+                f"You have reached your limit of {max_channels} connected storage channels. "
+                f"Manage your channels with /channels.",
+                parse_mode="HTML"
+            )
+            return
+
         await db.get_or_create_user(
             chat_id=user_id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
             is_admin=(user_id == settings.ADMIN_CHAT_ID)
         )
-        await db.link_user_channel(user_id, chat.id, channel_title)
-        await message.answer(
-            f"✅ Successfully linked to <b>{channel_title}</b> (<code>{chat.id}</code>)!\n\n"
-            f"You are all set to search and download music.",
-            parse_mode="HTML",
-            reply_markup=get_onboarding_keyboard()
-        )
+        await db.add_user_channel(user_id, channel_id, channel_title)
+
+        if len(channels) >= 1 and not already_linked:
+            routes = await db.get_all_platform_routes(user_id)
+            await message.answer(
+                f"✅ Successfully linked to <b>{channel_title}</b> (<code>{channel_id}</code>)!\n\n"
+                f"You now have <b>{len(channels) + 1}</b> storage vaults.\n"
+                f"Which platforms should be saved to this channel?",
+                parse_mode="HTML",
+                reply_markup=get_platform_route_keyboard(channel_id, user_id, routes)
+            )
+        else:
+            await message.answer(
+                f"✅ Successfully linked to <b>{channel_title}</b> (<code>{channel_id}</code>)!\n\n"
+                f"You are all set to search and download media.",
+                parse_mode="HTML",
+                reply_markup=get_onboarding_keyboard()
+            )
     except Exception as e:
         logger.warning(f"Failed to manually set channel '{target_id_str}' for {user_id}: {e}")
         bot_info = await bot.get_me()

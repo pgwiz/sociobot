@@ -21,12 +21,13 @@ logger = logging.getLogger(__name__)
 router = Router(name="search")
 
 
+from bot.utils.platform import detect_platform_and_url
+
+
 def is_direct_media_url(text: str) -> bool:
-    """Return True if the text is a direct Spotify or YouTube URL."""
-    text_lower = text.strip().lower()
-    return any(domain in text_lower for domain in (
-        "youtube.com", "youtu.be", "spotify.com", "open.spotify.com"
-    ))
+    """Return True if the text contains any supported media URL."""
+    _, url = detect_platform_and_url(text)
+    return url is not None
 
 
 @router.message(Command("search"))
@@ -41,12 +42,12 @@ async def cmd_search(message: Message):
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_plain_text_search(message: Message):
-    """Treat any non-command plain text message as a song search (or URL if link)."""
+    """Treat any non-command plain text message as a media URL or music search."""
     text = message.text.strip()
-    if is_direct_media_url(text):
-        # Pass to download handler logic or route to format picker
+    platform, direct_url = detect_platform_and_url(text)
+    if direct_url:
         from bot.handlers.download import handle_direct_url_request
-        await handle_direct_url_request(message, text)
+        await handle_direct_url_request(message, direct_url)
         return
 
     await execute_search(message, text)

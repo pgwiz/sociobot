@@ -82,7 +82,7 @@ class Downloader:
         quality: str
     ) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
         """Download track directly from stream extractor API with audio/video format integrity."""
-        is_video_quality = quality in ("720p", "360p", "best", "video")
+        is_video_quality = quality in ("720p", "360p", "best", "video", "saver")
 
         # 1. For Audio: Prioritize /download endpoint (pre-packaged pure MP3 with ID3 tags)
         if not is_video_quality:
@@ -263,11 +263,18 @@ class Downloader:
         import yt_dlp
 
         task_id = uuid.uuid4().hex[:8]
-        is_video_quality = quality in ("720p", "360p", "best", "video")
+        is_video_quality = quality in ("720p", "360p", "best", "video", "saver")
         outtmpl = str(self.download_dir / f"{task_id}.%(ext)s")
 
+        if quality == "saver":
+            fmt = "worstvideo[ext=mp4]+worstaudio/worst[ext=mp4]/worst"
+        elif is_video_quality:
+            fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]"
+        else:
+            fmt = "bestaudio/best"
+
         ydl_opts = {
-            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]" if is_video_quality else "bestaudio/best",
+            "format": fmt,
             "outtmpl": outtmpl,
             "quiet": True,
             "no_warnings": True,

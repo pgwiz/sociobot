@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-09-30
+
+### Added
+- **Multi-Platform Media Extraction:**
+  - Expanded beyond YouTube and Spotify to support 9 media platforms: YouTube, Spotify, TikTok, Instagram, Twitter/X, Reddit, SoundCloud, Bandcamp, and Vimeo.
+  - Regex-based URL platform detector (`bot.utils.platform`) with strict domain delimiters.
+  - Social videos (TikTok, Instagram, Twitter/X, Reddit) automatically download in lowest quality (`saver` MP4) to preserve storage and bandwidth.
+  - Interactive `[ 🎵 Extract Audio ]` button attached to social video deliveries for 1-tap conversion to ID3-tagged 320k MP3 audio.
+  - Music platforms (Spotify, SoundCloud, Bandcamp, YouTube audio) default to high-bitrate ID3-tagged MP3 (`audio_high`).
+- **Multi-Channel Storage Vaults & Quotas:**
+  - Users can now connect up to 5 private storage channels on the free tier (`DEFAULT_MAX_CHANNELS = 5`).
+  - Quota is fully upgradeable by Super Admins via the `/user <id>` panel (5, 10, 20, or Unlimited).
+  - New `/channels` interactive management dashboard showing all linked vaults, active routes, and primary vault designations.
+  - Dedicated primary vault system: the first connected channel becomes primary automatically; users can switch primary vault with 1 tap.
+  - Safe channel unlinking with automatic platform route fallback: when a channel is unlinked, all assigned platforms automatically re-route to the primary vault.
+- **Platform Routing Matrix:**
+  - Platform-to-vault mapping matrix: route specific platforms to dedicated channels (e.g., Spotify/SoundCloud to *Music Vault*, TikTok/Reels to *Clips Archive*).
+  - Dynamic channel picker: when an unrouted media link is sent by a user with multiple channels, an inline prompt asks where that platform's media should be saved, remembering the selection for all future links.
+- **Super Admin Multi-Channel & Quota Controls:**
+  - `/user <id>` inspection card now renders all linked channels, active platform routes, and channel quota badges.
+  - Added per-channel unlinking action buttons (`cb:adm_unlink_ch:<user_id>:<channel_id>`).
+  - Added interactive quota upgrade menu (`cb:adm_quota_menu:<user_id>`).
+- **Database Schema Upgrades:**
+  - Added `user_channels` and `user_platform_routes` tables with zero data loss.
+  - Added `max_channels` column to `users`.
+  - Added `platform` and `destination_channel_id` columns to `user_media_storage`.
+  - Seamless backward compatibility: legacy single-channel users automatically retain their channel as primary without disruption.
+
 ## [1.2.2] - 2026-09-29
 
 ### Fixed & Enhanced

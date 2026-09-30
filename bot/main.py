@@ -52,12 +52,13 @@ async def lifespan(app: FastAPI):
         from aiogram.types import BotCommand, BotCommandScopeDefault
         commands = [
             BotCommand(command="start", description="Start bot & setup storage channel"),
-            BotCommand(command="help", description="How to search, download, & manage vault"),
-            BotCommand(command="mychannel", description="Inspect your connected storage channel"),
+            BotCommand(command="channels", description="Manage storage channels & platform routes"),
+            BotCommand(command="mychannel", description="View your primary storage channel"),
             BotCommand(command="setchannel", description="Link channel manually (-100...)"),
+            BotCommand(command="help", description="How to search, download, & manage vault"),
             BotCommand(command="search", description="Search music catalog"),
-            BotCommand(command="download", description="Download audio (YouTube/Spotify)"),
-            BotCommand(command="video", description="Download video (YouTube MP4 720p)"),
+            BotCommand(command="download", description="Download audio (YouTube/Spotify/Music)"),
+            BotCommand(command="video", description="Download video (MP4 720p/Saver)"),
             BotCommand(command="history", description="Your recent channel downloads"),
             BotCommand(command="delete", description="Delete track from your channel (/delete <id>)"),
         ]

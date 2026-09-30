@@ -8,40 +8,43 @@ Instead of relying on a centralized bot-owned dump channel, users link their own
 
 ## 🌟 Key Features
 
-1. **Decentralized User-Owned Channel Warehousing:**
-   - Every user connects their own private Telegram channel.
-   - Media downloaded by a user is permanently saved to their private channel.
-   - The user has complete control to inspect, forward, or delete any media.
+1. **Decentralized Multi-Channel Storage Vaults:**
+   - Connect up to 5 private Telegram storage channels on the free tier (expandable up to 100/unlimited by admins).
+   - Dedicated `/channels` interactive dashboard for viewing vaults, toggling platform routes, designating primary vaults, and unlinking.
+   - Primary channel fallback: unlinking a channel automatically falls back any routed platforms to your primary vault without media loss.
 
-2. **Peer-to-Peer Cross-User Replication:**
+2. **Multi-Platform Media Extraction:**
+   - Native support for 9 platforms: **YouTube, Spotify, TikTok, Instagram, Twitter/X, Reddit, SoundCloud, Bandcamp, and Vimeo**.
+   - Social videos (TikTok, Instagram, Twitter/X, Reddit) automatically download in bandwidth-efficient lowest quality (`saver` MP4) with an attached `[ 🎵 Extract Audio ]` button.
+   - Music platforms (Spotify, SoundCloud, Bandcamp, YouTube audio) default to high-bitrate ID3-tagged MP3 (`audio_high` 320k).
+   - Emergency fallback to local `yt-dlp`.
+
+3. **Platform Routing Matrix & Dynamic Prompting:**
+   - Map specific platforms to dedicated storage vaults (e.g. Spotify to *Music Vault*, TikTok/Instagram to *Clips Archive*).
+   - When pasting an unrouted link with multiple connected vaults, Sociobot prompts once with an inline picker and remembers your destination vault for all future links.
+
+4. **Peer-to-Peer Cross-User Replication:**
    - When User B requests a track already cached in User A's channel, the bot replicates it via `copy_message` directly into User B's channel in `<200ms`.
    - User B gets their own independent copy with their own delete button.
    - Replicating creates distributed multi-node redundancy across channels.
 
-3. **Dual Delivery & Interactive Controls:**
+5. **Dual Delivery & Interactive Controls:**
    - Uploads to the user's private channel and delivers a playable audio or video file directly to their private chat (PM).
    - Attached action buttons:
      - `[ 📂 Open in Channel ]` — Direct deep-link (`https://t.me/c/<clean_id>/<msg_id>`) to the channel post.
+     - `[ 🎵 Extract Audio ]` — 1-tap conversion of social videos to pure ID3-tagged MP3.
      - `[ 🗑️ Delete ]` — One-tap deletion that removes the message from the user's channel and updates database records.
      - `[ ⚡ Force Re-download ]` — Bypasses cached copies and fetches fresh media from the extractor.
 
-4. **Polite Onboarding & Privacy Notice:**
+6. **Polite Onboarding & Privacy Notice:**
    - Auto-detects when the bot is promoted to administrator in a private channel via Telegram's `ChatMemberUpdated` event.
-   - Delivers a polite, concise notice:
-     > *"✅ Channel linked! Your media is safely archived here for your full control. To keep downloads lightning-fast, audio may also be shared anonymously across the community network."*
-     with a one-tap `[ Let's Go 🚀 ]` confirmation button.
+   - When connecting a 2nd+ channel, prompts with the platform routing matrix to assign platforms right away.
 
-5. **Keyless Music Extraction:**
-   - Powered by `https://ytsp-api.pgwiz.cloud` with native Spotify and YouTube resolution.
-   - Pre-packaged ID3-tagged MP3 audio files with high bitrate (`320k`).
-   - Genuine MP4 streaming video (`720p HD`).
-   - Local `yt-dlp` emergency fallback.
-
-6. **Dual Database Engine & Schema Isolation:**
+7. **Dual Database Engine & Schema Isolation:**
    - **Neon Serverless PostgreSQL (Primary):** Isolated custom schema (`DB_SCHEMA=sociobot`) preventing any collision with other bots sharing the same database. Connection pooling with PgBouncer compatibility (`statement_cache_size=0`), cold-start exponential backoff, automatic query reconnection, and optional keepalive ping loop.
    - **SQLite (Local Fallback):** Asynchronous `aiosqlite` with WAL mode enabled.
 
-7. **Production Ready & Cloud Deployable:**
+8. **Production Ready & Cloud Deployable:**
    - FastAPI health check and metrics endpoints (`/`, `/health`, `/stats`).
    - WSGI & ASGI compatible via `a2wsgi` for seamless 24/7 Render deployment under `gunicorn your_application.wsgi`.
 
@@ -54,11 +57,12 @@ Instead of relying on a centralized bot-owned dump channel, users link their own
 | :--- | :--- |
 | `/start` | Welcome greeting, channel status check, and setup guide. |
 | `/help` | Complete command usage reference. |
-| `/mychannel` | Inspect currently linked channel status, ID, and connection state. |
+| `/channels` | Interactive multi-channel storage vault and platform routing dashboard. |
+| `/mychannel` | Inspect currently linked primary channel status and ID. |
 | `/setchannel <id>` | Manually link a channel by ID (e.g. `-100...`) or by forwarding a message. |
 | `/search <query>` | Search Spotify/YouTube catalog with 1-click download buttons. |
-| `/download <url> [force]` | Download audio (MP3 320k) from Spotify or YouTube. |
-| `/video <url> [force]` | Download video (MP4 720p) from YouTube. |
+| `/download <url> [force]` | Download audio (MP3 320k) from supported platforms. |
+| `/video <url> [force]` | Download video (MP4) from supported platforms. |
 | `/history` | View recent vault downloads with direct channel links. |
 | `/delete <track_id>` | Delete track copies from your personal channel and library. |
 
@@ -73,12 +77,13 @@ Instead of relying on a centralized bot-owned dump channel, users link their own
 | Command | Description |
 | :--- | :--- |
 | `/users [search]` | Interactive paginated browser to view all registered users, channel status, and vault counts. |
-| `/user <id or @username>` | Deep inspection card for a specific user with management action buttons. |
+| `/user <id or @username>` | Deep inspection card for a specific user with multi-channel and quota controls. |
 | `/dm <user_id> <message>` | Send an official direct message to a user. |
 
 **Super Admin In-Bot Actions:**
 - `[ 📁 View Stored Vault ]`: Browse the tracks currently archived in that user's channel.
-- `[ 🔗 Unlink Channel ]`: Forcefully disconnect an invalid or abusive channel.
+- `[ 🗑️ Unlink: <channel> ]`: Forcefully disconnect a specific storage channel for that user.
+- `[ 💎 Upgrade Quota ]`: Set user maximum channel quota (5, 10, 20, or 100/Unlimited).
 - `[ 👑 Make Admin / Demote Admin ]`: Promote or demote admins.
 - `[ 🚫 Ban User / Unban User ]`: Block abusive users from using the bot.
 

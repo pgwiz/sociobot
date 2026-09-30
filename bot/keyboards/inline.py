@@ -2,6 +2,7 @@
 
 from typing import List, Dict, Any, Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from bot.utils.platform import SUPPORTED_PLATFORMS, get_platform_display_name, get_platform_icon
 
 
 def format_channel_post_url(channel_id: int, message_id: int) -> str:
@@ -91,23 +92,30 @@ def get_format_picker_keyboard(track_id: str, query: Optional[str] = None) -> In
 def get_media_delivery_keyboard(
     channel_post_url: str,
     track_id: str,
-    quality: str = "audio_high"
+    quality: str = "audio_high",
+    show_extract_audio: bool = False
 ) -> InlineKeyboardMarkup:
     """
     Action buttons attached to the delivered media in user PM:
     1. Direct deep-link to post in user's channel.
-    2. Interactive delete button to purge from user's channel and DB.
-    3. Force re-download button.
+    2. Optional audio extraction button for social video clips.
+    3. Interactive delete button to purge from user's channel and DB.
+    4. Force re-download button.
     """
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [
             InlineKeyboardButton(text="📂 Open in Channel", url=channel_post_url)
-        ],
-        [
-            InlineKeyboardButton(text="🗑️ Delete", callback_data=f"cb:del:{track_id}:{quality}"),
-            InlineKeyboardButton(text="⚡ Force Re-download", callback_data=f"cb:force:{track_id}:{quality}")
         ]
+    ]
+    if show_extract_audio:
+        rows.append([
+            InlineKeyboardButton(text="🎵 Extract Audio", callback_data=f"cb:extract_audio:{track_id}")
+        ])
+    rows.append([
+        InlineKeyboardButton(text="🗑️ Delete", callback_data=f"cb:del:{track_id}:{quality}"),
+        InlineKeyboardButton(text="⚡ Force Re-download", callback_data=f"cb:force:{track_id}:{quality}")
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_admin_dashboard_keyboard(is_super_admin: bool = False) -> InlineKeyboardMarkup:
@@ -172,7 +180,9 @@ def get_user_detail_keyboard(
     is_admin: bool,
     is_banned: bool,
     has_channel: bool,
-    vault_count: int = 0
+    vault_count: int = 0,
+    channels: Optional[List[Dict[str, Any]]] = None,
+    max_channels: int = 5
 ) -> InlineKeyboardMarkup:
     """Action buttons for inspecting and managing a specific user."""
     rows = []
@@ -181,11 +191,31 @@ def get_user_detail_keyboard(
             InlineKeyboardButton(text=f"📁 View Stored Vault ({vault_count})", callback_data=f"cb:usr_vault:{user_id}:1")
         ])
 
-    action_row = []
-    if has_channel:
-        action_row.append(InlineKeyboardButton(text="🔗 Unlink Channel", callback_data=f"cb:usr_unlink:{user_id}"))
-    action_row.append(InlineKeyboardButton(text="💬 Message User", callback_data=f"cb:usr_dm:{user_id}"))
-    rows.append(action_row)
+    # Per-channel unlink buttons
+    if channels:
+        for ch in channels:
+            cid = ch["channel_id"]
+            title = ch.get("channel_title") or f"Channel {cid}"
+            star = "🌟 " if ch.get("is_primary") else ""
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"🗑️ Unlink: {star}{title[:18]}",
+                    callback_data=f"cb:adm_unlink_ch:{user_id}:{cid}"
+                )
+            ])
+    elif has_channel:
+        rows.append([
+            InlineKeyboardButton(text="🔗 Unlink All Channels", callback_data=f"cb:usr_unlink:{user_id}")
+        ])
+
+    # Quota upgrade button
+    rows.append([
+        InlineKeyboardButton(text=f"💎 Upgrade Quota (Max: {max_channels})", callback_data=f"cb:adm_quota_menu:{user_id}")
+    ])
+
+    rows.append([
+        InlineKeyboardButton(text="💬 Message User", callback_data=f"cb:usr_dm:{user_id}")
+    ])
 
     perm_row = [
         InlineKeyboardButton(
@@ -203,6 +233,123 @@ def get_user_detail_keyboard(
         InlineKeyboardButton(text="⬅️ Back to Users", callback_data="cb:usr_page:1")
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_channels_dashboard_keyboard(
+    channels: List[Dict[str, Any]],
+    routes_map: Dict[str, int],
+    max_channels: int = 5,
+    bot_username: Optional[str] = None
+) -> InlineKeyboardMarkup:
+    """Main interactive keyboard for /channels vault dashboard."""
+    rows = []
+    for ch in channels:
+        cid = ch["channel_id"]
+        title = ch.get("channel_title") or "Vault Channel"
+        is_primary = ch.get("is_primary", False)
+
+        assigned_count = sum(1 for target_cid in routes_map.values() if target_cid == cid)
+        route_label = f"⚙️ Route ({assigned_count} tags)"
+
+        rows.append([
+            InlineKeyboardButton(text=f"📁 {title[:18]}", callback_data="cb:noop"),
+            InlineKeyboardButton(text=route_label, callback_data=f"cb:ch_route:{cid}")
+        ])
+
+        ch_actions = []
+        if not is_primary:
+            ch_actions.append(InlineKeyboardButton(text="🌟 Make Primary", callback_data=f"cb:ch_set_primary:{cid}"))
+        else:
+            ch_actions.append(InlineKeyboardButton(text="🌟 Primary", callback_data="cb:noop"))
+
+        ch_actions.append(InlineKeyboardButton(text="🗑️ Unlink", callback_data=f"cb:ch_unlink:{cid}"))
+        rows.append(ch_actions)
+
+    if len(channels) < max_channels and bot_username:
+        rows.append([
+            InlineKeyboardButton(
+                text="➕ Link New Channel",
+                url=f"https://t.me/{bot_username}?startchannel=sociobot&admin=post_messages+edit_messages+delete_messages"
+            )
+        ])
+    elif len(channels) >= max_channels:
+        rows.append([
+            InlineKeyboardButton(text=f"🔒 Limit Reached ({len(channels)}/{max_channels})", callback_data="cb:noop")
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="🔄 Refresh", callback_data="cb:ch_refresh"),
+        InlineKeyboardButton(text="❌ Close", callback_data="cb:close")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_platform_route_keyboard(
+    channel_id: int,
+    user_id: int,
+    current_routes: Dict[str, int]
+) -> InlineKeyboardMarkup:
+    """Platform routing toggle matrix for a specific channel."""
+    rows = []
+    row = []
+    for platform_key, name, icon in SUPPORTED_PLATFORMS:
+        is_routed = (current_routes.get(platform_key) == channel_id)
+        status_box = "✅" if is_routed else "⬜"
+        btn_text = f"{status_box} {icon} {name}"
+        row.append(InlineKeyboardButton(text=btn_text, callback_data=f"cb:ch_toggle:{channel_id}:{platform_key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    rows.append([
+        InlineKeyboardButton(text="⬅️ Back to Channels", callback_data="cb:ch_back"),
+        InlineKeyboardButton(text="❌ Close", callback_data="cb:close")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_channel_picker_keyboard(
+    channels: List[Dict[str, Any]],
+    platform: str,
+    track_id: Optional[str] = None,
+    quality: Optional[str] = None
+) -> InlineKeyboardMarkup:
+    """Channel selection menu when an unrouted media link is detected."""
+    rows = []
+    for ch in channels:
+        cid = ch["channel_id"]
+        title = ch.get("channel_title") or f"Channel {cid}"
+        star = "🌟 " if ch.get("is_primary") else ""
+        btn_text = f"{star}{title[:24]}"
+        rows.append([
+            InlineKeyboardButton(
+                text=btn_text,
+                callback_data=f"cb:route_pick:{platform}:{cid}"
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(text="❌ Cancel", callback_data="cb:close")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_quota_upgrade_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Admin selection menu for upgrading a user's channel quota."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="5 Channels (Default)", callback_data=f"cb:adm_set_quota:{user_id}:5"),
+            InlineKeyboardButton(text="10 Channels", callback_data=f"cb:adm_set_quota:{user_id}:10")
+        ],
+        [
+            InlineKeyboardButton(text="20 Channels", callback_data=f"cb:adm_set_quota:{user_id}:20"),
+            InlineKeyboardButton(text="100 Channels (Unlimited)", callback_data=f"cb:adm_set_quota:{user_id}:100")
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Back to User Profile", callback_data=f"cb:usr_view:{user_id}")
+        ]
+    ])
 
 
 def get_user_vault_keyboard(

@@ -79,9 +79,10 @@ class StreamApiClient:
         if cached_result:
             return cached_result
 
-        is_spotify = "spotify" in video_id_or_url or (len(video_id_or_url) == 22 and not video_id_or_url.isalnum())
-        if is_spotify:
-            sp_url = video_id_or_url if video_id_or_url.startswith("http") else f"https://open.spotify.com/track/{video_id_or_url}"
+        if video_id_or_url.startswith("http://") or video_id_or_url.startswith("https://"):
+            data = await self._request_with_retry("GET", "/get", params={"ytl": video_id_or_url, "quality": quality}, timeout=45.0)
+        elif "spotify" in video_id_or_url or (len(video_id_or_url) == 22 and not video_id_or_url.isalnum()):
+            sp_url = f"https://open.spotify.com/track/{video_id_or_url}"
             data = await self._request_with_retry("GET", "/get", params={"ytl": sp_url, "quality": quality}, timeout=45.0)
         else:
             endpoint = f"/stream/{video_id_or_url}"

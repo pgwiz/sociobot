@@ -22,11 +22,20 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from bot.config import settings
 from bot.database import db
 from bot.downloader import downloader
+from bot.cache import cache
+from bot.utils.platform import (
+    detect_platform_and_url,
+    get_quality_for_platform,
+    is_social_video,
+    get_platform_display_name,
+    get_platform_icon
+)
 from bot.keyboards.inline import (
     format_channel_post_url,
     get_media_delivery_keyboard,
     get_channel_setup_keyboard,
-    get_format_picker_keyboard
+    get_format_picker_keyboard,
+    get_channel_picker_keyboard
 )
 
 logger = logging.getLogger(__name__)
@@ -34,14 +43,73 @@ router = Router(name="download")
 
 
 async def handle_direct_url_request(message: Message, url: str):
-    """Invoked when user pastes a Spotify or YouTube URL in chat."""
-    # Present format selector for the URL
-    kb = get_format_picker_keyboard(url)
-    await message.answer(
-        f"🔗 <b>Detected Media Link:</b>\n<code>{url}</code>\n\n"
-        f"Choose download format:",
-        parse_mode="HTML",
-        reply_markup=kb
+    """Invoked when user pastes any supported media URL in chat."""
+    user_id = message.from_user.id
+    platform, clean_url = detect_platform_and_url(url)
+    target_url = clean_url or url
+    platform_name = platform or "other"
+
+    channels = await db.get_user_channels(user_id)
+    if not channels:
+        bot_info = await message.bot.get_me()
+        warn_text = (
+            "⚠️ <b>Storage Channel Required</b>\n\n"
+            "To download and maintain total control over your media, you need to connect your personal private channel.\n\n"
+            f"Please add @{bot_info.username} as an <b>Administrator</b> to your channel, and it will be linked instantly!\n\n"
+            "Use /channels to view and configure your storage vaults."
+        )
+        kb = get_channel_setup_keyboard(bot_info.username)
+        await message.answer(warn_text, parse_mode="HTML", reply_markup=kb)
+        return
+
+    # Check if this platform has an explicit route
+    existing_route = await db.get_platform_route(user_id, platform_name)
+
+    # If unrouted and user has multiple channels -> prompt dynamic channel picker once
+    if not existing_route and len(channels) > 1:
+        quality = get_quality_for_platform(platform_name)
+        display_name = get_platform_display_name(platform_name)
+        icon = get_platform_icon(platform_name)
+        await cache.set(f"pending_route_dl:{user_id}", {"url": target_url, "platform": platform_name, "quality": quality}, ttl=300)
+        kb = get_channel_picker_keyboard(channels, platform_name)
+        await message.answer(
+            f"🔗 <b>Detected {icon} {display_name} Link:</b>\n"
+            f"<code>{target_url}</code>\n\n"
+            f"Where should <b>{display_name}</b> media be saved?\n"
+            f"<i>(We'll remember your choice for future links!)</i>",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+        return
+
+    # If YouTube, offer format selection (Audio vs Video)
+    if platform_name == "youtube":
+        kb = get_format_picker_keyboard(target_url)
+        await message.answer(
+            f"🔗 <b>Detected Media Link:</b>\n<code>{target_url}</code>\n\n"
+            f"Choose download format:",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+        return
+
+    # For social videos and music platforms: proceed directly
+    quality = get_quality_for_platform(platform_name)
+    display_name = get_platform_display_name(platform_name)
+    icon = get_platform_icon(platform_name)
+    status_msg = await message.answer(
+        f"⏳ <b>Processing {icon} {display_name} download...</b>",
+        parse_mode="HTML"
+    )
+    await process_media_request(
+        bot=message.bot,
+        user_id=user_id,
+        reply_to_chat_id=message.chat.id,
+        track_id=target_url,
+        quality=quality,
+        force=False,
+        status_message=status_msg,
+        platform=platform_name
     )
 
 
@@ -135,7 +203,8 @@ async def process_media_request(
     track_id: str,
     quality: str,
     force: bool = False,
-    status_message: Optional[Message] = None
+    status_message: Optional[Message] = None,
+    platform: Optional[str] = None
 ):
     """Core orchestration for decentralized peer delivery and media archiving."""
     if await db.is_user_banned(user_id):
@@ -148,13 +217,18 @@ async def process_media_request(
 
     bot_info = await bot.get_me()
 
-    # 1. Verify user's connected private channel
-    channel_info = await db.get_user_channel(user_id)
-    if not channel_info or not channel_info.get("channel_id") or not channel_info.get("is_storage_active"):
+    if not platform:
+        p, _ = detect_platform_and_url(track_id)
+        platform = p if p else "youtube"
+
+    # 1. Verify user's destination private channel
+    user_channel_id = await db.get_destination_channel(user_id, platform)
+    if not user_channel_id:
         warn_text = (
             "⚠️ <b>Storage Channel Required</b>\n\n"
             "To download and maintain total control over your media, you need to connect your personal private channel.\n\n"
-            f"Please add @{bot_info.username} as an <b>Administrator</b> to your channel, and it will be linked instantly!"
+            f"Please add @{bot_info.username} as an <b>Administrator</b> to your channel, and it will be linked instantly!\n\n"
+            "Use /channels to view and configure your storage vaults."
         )
         kb = get_channel_setup_keyboard(bot_info.username)
         if status_message:
@@ -163,7 +237,7 @@ async def process_media_request(
             await bot.send_message(chat_id=reply_to_chat_id, text=warn_text, parse_mode="HTML", reply_markup=kb)
         return
 
-    user_channel_id = channel_info["channel_id"]
+    show_extract = is_social_video(platform) and (quality in ("saver", "720p", "360p", "best", "video"))
 
     # 2. Check if user already owns this track in their own channel (unless forced)
     if not force:
@@ -172,7 +246,7 @@ async def process_media_request(
             try:
                 # Fast delivery directly from user's channel to PM
                 post_url = existing_copy.get("channel_post_url") or format_channel_post_url(user_channel_id, existing_copy["channel_msg_id"])
-                delivery_kb = get_media_delivery_keyboard(post_url, track_id, quality)
+                delivery_kb = get_media_delivery_keyboard(post_url, track_id, quality, show_extract_audio=show_extract)
                 await bot.copy_message(
                     chat_id=reply_to_chat_id,
                     from_chat_id=user_channel_id,
@@ -218,7 +292,9 @@ async def process_media_request(
                         channel_post_url=post_url,
                         track_id=track_id,
                         quality=quality,
-                        telegram_file_id=peer.get("telegram_file_id")
+                        telegram_file_id=peer.get("telegram_file_id"),
+                        platform=platform,
+                        destination_channel_id=user_channel_id
                     )
 
                     await db.log_download(
@@ -231,7 +307,7 @@ async def process_media_request(
                     )
 
                     # Deliver to user PM
-                    delivery_kb = get_media_delivery_keyboard(post_url, track_id, quality)
+                    delivery_kb = get_media_delivery_keyboard(post_url, track_id, quality, show_extract_audio=show_extract)
                     await bot.copy_message(
                         chat_id=reply_to_chat_id,
                         from_chat_id=user_channel_id,
@@ -264,11 +340,18 @@ async def process_media_request(
     file_path, thumb_path, metadata = await downloader.download_track(track_id, quality=quality, force_fallback=force)
 
     if not file_path or not os.path.exists(file_path):
-        err_text = "❌ Failed to download or convert media. The source might be restricted or unavailable."
-        if status_message:
-            await status_message.edit_text(err_text)
+        if platform in ("tiktok", "instagram"):
+            err_text = (
+                f"❌ Could not download from <b>{get_platform_display_name(platform)}</b>.\n\n"
+                "The platform may be blocking access or the media is private/restricted. "
+                "Please try another link or verify the post is public."
+            )
         else:
-            await bot.send_message(chat_id=reply_to_chat_id, text=err_text)
+            err_text = "❌ Failed to download or convert media. The source might be restricted or unavailable."
+        if status_message:
+            await status_message.edit_text(err_text, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=reply_to_chat_id, text=err_text, parse_mode="HTML")
         return
 
     # 5. Upload media directly to user's personal channel
@@ -317,7 +400,9 @@ async def process_media_request(
             channel_post_url=post_url,
             track_id=track_id,
             quality=quality,
-            telegram_file_id=file_id
+            telegram_file_id=file_id,
+            platform=platform,
+            destination_channel_id=user_channel_id
         )
 
         await db.save_track_metadata(
@@ -340,7 +425,7 @@ async def process_media_request(
         )
 
         # Deliver to user PM with interactive action buttons
-        delivery_kb = get_media_delivery_keyboard(post_url, track_id, quality)
+        delivery_kb = get_media_delivery_keyboard(post_url, track_id, quality, show_extract_audio=show_extract)
         await bot.copy_message(
             chat_id=reply_to_chat_id,
             from_chat_id=user_channel_id,
@@ -369,3 +454,25 @@ async def process_media_request(
     finally:
         # Cleanup temp local files
         downloader.cleanup_files(file_path, thumb_path)
+
+
+@router.callback_query(F.data.startswith("cb:extract_audio:"))
+async def cb_extract_audio(callback: CallbackQuery, bot: Bot):
+    """Handle audio extraction request from a social video post."""
+    track_id = callback.data.split("cb:extract_audio:")[1].strip()
+    await callback.answer("🎵 Extracting audio track as MP3...")
+    status_msg = await callback.message.answer("⏳ <i>Extracting audio track as MP3...</i>", parse_mode="HTML")
+
+    p, _ = detect_platform_and_url(track_id)
+    platform = p if p else "youtube"
+
+    await process_media_request(
+        bot=bot,
+        user_id=callback.from_user.id,
+        reply_to_chat_id=callback.message.chat.id,
+        track_id=track_id,
+        quality="audio_high",
+        force=False,
+        status_message=status_msg,
+        platform=platform
+    )

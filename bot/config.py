@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     DB_POOL_MIN_SIZE: int = Field(2, description="Min asyncpg pool connections")
     DB_POOL_MAX_SIZE: int = Field(10, description="Max asyncpg pool connections")
     ENABLE_NEON_KEEPALIVE: bool = Field(False, description="Enable Neon ping loop")
+    DEFAULT_MAX_CHANNELS: int = Field(5, description="Default channel quota per user")
 
     # Downloads & Temporary File Handling
     DOWNLOAD_DIR: str = Field("./downloads", description="Local temp download directory")

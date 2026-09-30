@@ -180,6 +180,7 @@ class Database:
                 raise RuntimeError("Database connection pool is shutting down.")
             try:
                 async with self.pg_pool.acquire() as conn:
+                    await conn.execute(f'SET search_path TO "{self.schema}", public;')
                     return await callback(conn)
             except NEON_TRANSIENT_ERRORS as e:
                 err_repr = str(e).strip() or repr(e)
@@ -222,7 +223,27 @@ class Database:
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                     );
+                    CREATE TABLE IF NOT EXISTS user_channels (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_chat_id BIGINT NOT NULL,
+                        channel_id BIGINT NOT NULL,
+                        channel_title TEXT NOT NULL,
+                        is_primary BOOLEAN DEFAULT FALSE,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        CONSTRAINT unique_user_channel UNIQUE (user_chat_id, channel_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS user_platform_routes (
+                        user_chat_id BIGINT NOT NULL,
+                        platform TEXT NOT NULL,
+                        channel_id BIGINT NOT NULL,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        PRIMARY KEY (user_chat_id, platform)
+                    );
+
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS max_channels INT DEFAULT 5;
 
                     CREATE TABLE IF NOT EXISTS user_media_storage (
                         id BIGSERIAL PRIMARY KEY,
@@ -234,9 +255,13 @@ class Database:
                         quality TEXT NOT NULL,
                         telegram_file_id TEXT,
                         is_available BOOLEAN DEFAULT TRUE,
+                        platform TEXT DEFAULT 'youtube',
+                        destination_channel_id BIGINT,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         CONSTRAINT unique_user_track_quality UNIQUE(user_chat_id, track_id, quality)
                     );
+                    ALTER TABLE user_media_storage ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'youtube';
+                    ALTER TABLE user_media_storage ADD COLUMN IF NOT EXISTS destination_channel_id BIGINT;
 
                     CREATE TABLE IF NOT EXISTS tracks (
                         track_id TEXT NOT NULL,
@@ -282,6 +307,14 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_storage_channel ON user_media_storage(channel_id);
                     CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at);
                     CREATE INDEX IF NOT EXISTS idx_history_user ON download_history(user_chat_id);
+                    CREATE INDEX IF NOT EXISTS idx_user_channels_user ON user_channels(user_chat_id);
+                    CREATE INDEX IF NOT EXISTS idx_platform_routes_user ON user_platform_routes(user_chat_id);
+
+                    INSERT INTO user_channels (user_chat_id, channel_id, channel_title, is_primary, is_active)
+                    SELECT chat_id, channel_id, COALESCE(channel_title, 'My Storage Channel'), TRUE, TRUE
+                    FROM users
+                    WHERE channel_id IS NOT NULL
+                    ON CONFLICT (user_chat_id, channel_id) DO NOTHING;
                 """)
             await self._execute_pg_with_retry(_run)
             logger.info(f"Neon PostgreSQL schema migrations applied successfully to schema '{schema}'.")
@@ -297,8 +330,28 @@ class Database:
                     terms_accepted INTEGER DEFAULT 0,
                     is_admin INTEGER DEFAULT 0,
                     is_banned INTEGER DEFAULT 0,
+                    max_channels INTEGER DEFAULT 5,
                     created_at TEXT DEFAULT (datetime('now')),
                     last_active TEXT DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS user_channels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_chat_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    channel_title TEXT NOT NULL,
+                    is_primary INTEGER DEFAULT 0,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(user_chat_id, channel_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_platform_routes (
+                    user_chat_id INTEGER NOT NULL,
+                    platform TEXT NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (user_chat_id, platform)
                 );
 
                 CREATE TABLE IF NOT EXISTS user_media_storage (
@@ -311,6 +364,8 @@ class Database:
                     quality TEXT NOT NULL,
                     telegram_file_id TEXT,
                     is_available INTEGER DEFAULT 1,
+                    platform TEXT DEFAULT 'youtube',
+                    destination_channel_id INTEGER,
                     created_at TEXT DEFAULT (datetime('now')),
                     UNIQUE(user_chat_id, track_id, quality)
                 );
@@ -359,10 +414,30 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_storage_channel ON user_media_storage(channel_id);
                 CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at);
                 CREATE INDEX IF NOT EXISTS idx_history_user ON download_history(user_chat_id);
+                CREATE INDEX IF NOT EXISTS idx_user_channels_user ON user_channels(user_chat_id);
+                CREATE INDEX IF NOT EXISTS idx_platform_routes_user ON user_platform_routes(user_chat_id);
             """)
             await self.sqlite_conn.commit()
+
+            for alter_sql in (
+                "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0;",
+                "ALTER TABLE users ADD COLUMN max_channels INTEGER DEFAULT 5;",
+                "ALTER TABLE user_media_storage ADD COLUMN platform TEXT DEFAULT 'youtube';",
+                "ALTER TABLE user_media_storage ADD COLUMN destination_channel_id INTEGER;"
+            ):
+                try:
+                    await self.sqlite_conn.execute(alter_sql)
+                    await self.sqlite_conn.commit()
+                except Exception:
+                    pass
+
             try:
-                await self.sqlite_conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0;")
+                await self.sqlite_conn.execute("""
+                    INSERT OR IGNORE INTO user_channels (user_chat_id, channel_id, channel_title, is_primary, is_active)
+                    SELECT chat_id, channel_id, coalesce(channel_title, 'My Storage Channel'), 1, 1
+                    FROM users
+                    WHERE channel_id IS NOT NULL;
+                """)
                 await self.sqlite_conn.commit()
             except Exception:
                 pass
@@ -379,7 +454,7 @@ class Database:
     ) -> Dict[str, Any]:
         """Fetch or insert a user record, updating activity timestamp."""
         if not self.is_connected:
-            return {"chat_id": chat_id, "username": username, "first_name": first_name, "is_admin": is_admin, "is_banned": False}
+            return {"chat_id": chat_id, "username": username, "first_name": first_name, "is_admin": is_admin, "is_banned": False, "max_channels": 5}
 
         if self.is_postgres:
             async def _run(conn):
@@ -392,7 +467,7 @@ class Database:
                         first_name = EXCLUDED.first_name,
                         last_active = NOW(),
                         is_admin = CASE WHEN users.is_admin THEN TRUE ELSE EXCLUDED.is_admin END
-                    RETURNING chat_id, username, first_name, channel_id, channel_title, is_storage_active, terms_accepted, is_admin, is_banned;
+                    RETURNING chat_id, username, first_name, channel_id, channel_title, is_storage_active, terms_accepted, is_admin, is_banned, max_channels;
                     """,
                     chat_id, username, first_name, is_admin
                 )
@@ -412,7 +487,7 @@ class Database:
             )
             await self.sqlite_conn.commit()
             cursor = await self.sqlite_conn.execute(
-                "SELECT chat_id, username, first_name, channel_id, channel_title, is_storage_active, terms_accepted, is_admin, is_banned FROM users WHERE chat_id = ?;",
+                "SELECT chat_id, username, first_name, channel_id, channel_title, is_storage_active, terms_accepted, is_admin, is_banned, max_channels FROM users WHERE chat_id = ?;",
                 (chat_id,)
             )
             row = await cursor.fetchone()
@@ -422,13 +497,19 @@ class Database:
                 d["terms_accepted"] = bool(d.get("terms_accepted", 0))
                 d["is_admin"] = bool(d.get("is_admin", 0))
                 d["is_banned"] = bool(d.get("is_banned", 0))
+                d["max_channels"] = int(d.get("max_channels") or 5)
                 return d
             return {}
 
     async def link_user_channel(self, chat_id: int, channel_id: int, channel_title: str) -> None:
-        """Register or update a user's private storage channel."""
+        """Register or update a user's private storage channel (syncs user_channels and users)."""
         if not self.is_connected:
             return
+
+        try:
+            await self.add_user_channel(chat_id, channel_id, channel_title, set_primary=True)
+        except Exception as e:
+            logger.warning(f"Error in link_user_channel adding to user_channels: {e}")
 
         if self.is_postgres:
             async def _run(conn):
@@ -467,6 +548,7 @@ class Database:
                     """,
                     chat_id
                 )
+                await conn.execute("UPDATE user_channels SET is_active = FALSE WHERE user_chat_id = $1;", chat_id)
             await self._execute_pg_with_retry(_run)
         else:
             await self.sqlite_conn.execute(
@@ -477,6 +559,7 @@ class Database:
                 """,
                 (chat_id,)
             )
+            await self.sqlite_conn.execute("UPDATE user_channels SET is_active = 0 WHERE user_chat_id = ?;", (chat_id,))
             await self.sqlite_conn.commit()
 
     async def set_terms_accepted(self, chat_id: int, accepted: bool = True) -> None:
@@ -499,10 +582,33 @@ class Database:
             await self.sqlite_conn.commit()
 
     async def get_user_channel(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        """Retrieve user channel info and storage readiness."""
+        """Retrieve primary user channel info and storage readiness (backward-compatible)."""
         if not self.is_connected:
             return None
 
+        # 1. Prefer active primary from user_channels
+        channels = await self.get_user_channels(chat_id)
+        if channels:
+            primary = next((c for c in channels if c.get("is_primary")), channels[0])
+            user_terms = False
+            if self.is_postgres:
+                async def _get_terms(conn):
+                    return await conn.fetchval("SELECT terms_accepted FROM users WHERE chat_id = $1;", chat_id)
+                user_terms = bool(await self._execute_pg_with_retry(_get_terms) or False)
+            else:
+                cur = await self.sqlite_conn.execute("SELECT terms_accepted FROM users WHERE chat_id = ?;", (chat_id,))
+                r = await cur.fetchone()
+                user_terms = bool(r[0]) if r else False
+
+            return {
+                "channel_id": primary["channel_id"],
+                "channel_title": primary["channel_title"],
+                "is_storage_active": primary.get("is_active", True),
+                "terms_accepted": user_terms,
+                "is_primary": True
+            }
+
+        # 2. Fallback to legacy users table
         if self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
@@ -523,6 +629,467 @@ class Database:
                 d["terms_accepted"] = bool(d.get("terms_accepted", 0))
                 return d
             return None
+
+    # ── Multi-Channel & Platform Routing (v2.0) ──────────────────────────
+
+    async def get_user_max_channels(self, user_chat_id: int) -> int:
+        """Return the maximum number of storage channels allowed for a user."""
+        if not self.is_connected:
+            return getattr(settings, "DEFAULT_MAX_CHANNELS", 5)
+
+        default_max = getattr(settings, "DEFAULT_MAX_CHANNELS", 5)
+        if self.is_postgres:
+            async def _run(conn):
+                val = await conn.fetchval("SELECT max_channels FROM users WHERE chat_id = $1;", user_chat_id)
+                return int(val) if val is not None else default_max
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute("SELECT max_channels FROM users WHERE chat_id = ?;", (user_chat_id,))
+            row = await cur.fetchone()
+            return int(row[0]) if (row and row[0] is not None) else default_max
+
+    async def upgrade_user_quota(self, user_chat_id: int, max_channels: int) -> bool:
+        """Upgrade or update a user's channel quota."""
+        if not self.is_connected:
+            return False
+
+        if self.is_postgres:
+            async def _run(conn):
+                await conn.execute("UPDATE users SET max_channels = $1 WHERE chat_id = $2;", max_channels, user_chat_id)
+                return True
+            return await self._execute_pg_with_retry(_run)
+        else:
+            await self.sqlite_conn.execute("UPDATE users SET max_channels = ? WHERE chat_id = ?;", (max_channels, user_chat_id))
+            await self.sqlite_conn.commit()
+            return True
+
+    async def get_channel_count(self, user_chat_id: int) -> int:
+        """Count active channels linked to a user."""
+        if not self.is_connected:
+            return 0
+
+        if self.is_postgres:
+            async def _run(conn):
+                val = await conn.fetchval(
+                    "SELECT COUNT(*) FROM user_channels WHERE user_chat_id = $1 AND is_active = TRUE;",
+                    user_chat_id
+                )
+                return int(val or 0)
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute(
+                "SELECT COUNT(*) FROM user_channels WHERE user_chat_id = ? AND is_active = 1;",
+                (user_chat_id,)
+            )
+            row = await cur.fetchone()
+            return int(row[0] or 0) if row else 0
+
+    async def get_user_channels(self, user_chat_id: int) -> List[Dict[str, Any]]:
+        """Return list of all active storage channels for a user, primary first."""
+        if not self.is_connected:
+            return []
+
+        if self.is_postgres:
+            async def _run(conn):
+                rows = await conn.fetch(
+                    """
+                    SELECT id, user_chat_id, channel_id, channel_title, is_primary, is_active, created_at
+                    FROM user_channels
+                    WHERE user_chat_id = $1 AND is_active = TRUE
+                    ORDER BY is_primary DESC, id ASC;
+                    """,
+                    user_chat_id
+                )
+                return [dict(r) for r in rows]
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute(
+                """
+                SELECT id, user_chat_id, channel_id, channel_title, is_primary, is_active, created_at
+                FROM user_channels
+                WHERE user_chat_id = ? AND is_active = 1
+                ORDER BY is_primary DESC, id ASC;
+                """,
+                (user_chat_id,)
+            )
+            rows = await cur.fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                d["is_primary"] = bool(d.get("is_primary", 0))
+                d["is_active"] = bool(d.get("is_active", 1))
+                result.append(d)
+            return result
+
+    async def add_user_channel(
+        self,
+        user_chat_id: int,
+        channel_id: int,
+        channel_title: str,
+        set_primary: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Link a channel to a user's vault network.
+        Enforces channel quota. Automatically sets primary if first channel or set_primary=True.
+        """
+        if not self.is_connected:
+            raise RuntimeError("Database disconnected.")
+
+        existing_channels = await self.get_user_channels(user_chat_id)
+        already_linked = any(c["channel_id"] == channel_id for c in existing_channels)
+
+        if not already_linked:
+            max_ch = await self.get_user_max_channels(user_chat_id)
+            if len(existing_channels) >= max_ch:
+                raise ValueError(f"Channel quota exceeded (max {max_ch}). Upgrade quota with admin.")
+
+        # If it's the user's first channel, always make it primary
+        if not existing_channels:
+            set_primary = True
+
+        if self.is_postgres:
+            async def _run(conn):
+                if set_primary:
+                    await conn.execute(
+                        "UPDATE user_channels SET is_primary = FALSE WHERE user_chat_id = $1;",
+                        user_chat_id
+                    )
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO user_channels (user_chat_id, channel_id, channel_title, is_primary, is_active, created_at)
+                    VALUES ($1, $2, $3, $4, TRUE, NOW())
+                    ON CONFLICT (user_chat_id, channel_id) DO UPDATE SET
+                        channel_title = EXCLUDED.channel_title,
+                        is_primary = CASE WHEN $4 THEN TRUE ELSE user_channels.is_primary END,
+                        is_active = TRUE
+                    RETURNING id, user_chat_id, channel_id, channel_title, is_primary, is_active;
+                    """,
+                    user_chat_id, channel_id, channel_title, set_primary
+                )
+                if set_primary:
+                    await conn.execute(
+                        "UPDATE users SET channel_id = $1, channel_title = $2, is_storage_active = TRUE WHERE chat_id = $3;",
+                        channel_id, channel_title, user_chat_id
+                    )
+                return dict(row) if row else {}
+            return await self._execute_pg_with_retry(_run)
+        else:
+            if set_primary:
+                await self.sqlite_conn.execute(
+                    "UPDATE user_channels SET is_primary = 0 WHERE user_chat_id = ?;",
+                    (user_chat_id,)
+                )
+            await self.sqlite_conn.execute(
+                """
+                INSERT INTO user_channels (user_chat_id, channel_id, channel_title, is_primary, is_active, created_at)
+                VALUES (?, ?, ?, ?, 1, datetime('now'))
+                ON CONFLICT (user_chat_id, channel_id) DO UPDATE SET
+                    channel_title = excluded.channel_title,
+                    is_primary = CASE WHEN ? = 1 THEN 1 ELSE user_channels.is_primary END,
+                    is_active = 1;
+                """,
+                (user_chat_id, channel_id, channel_title, 1 if set_primary else 0, 1 if set_primary else 0)
+            )
+            if set_primary:
+                await self.sqlite_conn.execute(
+                    "UPDATE users SET channel_id = ?, channel_title = ?, is_storage_active = 1 WHERE chat_id = ?;",
+                    (channel_id, channel_title, user_chat_id)
+                )
+            await self.sqlite_conn.commit()
+            return {
+                "user_chat_id": user_chat_id,
+                "channel_id": channel_id,
+                "channel_title": channel_title,
+                "is_primary": set_primary,
+                "is_active": True
+            }
+
+    async def set_primary_channel(self, user_chat_id: int, channel_id: int) -> bool:
+        """Mark a specific channel as primary and sync users table."""
+        if not self.is_connected:
+            return False
+
+        if self.is_postgres:
+            async def _run(conn):
+                await conn.execute(
+                    """
+                    UPDATE user_channels
+                    SET is_primary = (channel_id = $2)
+                    WHERE user_chat_id = $1 AND is_active = TRUE;
+                    """,
+                    user_chat_id, channel_id
+                )
+                title = await conn.fetchval(
+                    "SELECT channel_title FROM user_channels WHERE user_chat_id = $1 AND channel_id = $2;",
+                    user_chat_id, channel_id
+                )
+                if title:
+                    await conn.execute(
+                        "UPDATE users SET channel_id = $1, channel_title = $2, is_storage_active = TRUE WHERE chat_id = $3;",
+                        channel_id, title, user_chat_id
+                    )
+                return True
+            return await self._execute_pg_with_retry(_run)
+        else:
+            await self.sqlite_conn.execute(
+                """
+                UPDATE user_channels
+                SET is_primary = CASE WHEN channel_id = ? THEN 1 ELSE 0 END
+                WHERE user_chat_id = ? AND is_active = 1;
+                """,
+                (channel_id, user_chat_id)
+            )
+            cur = await self.sqlite_conn.execute(
+                "SELECT channel_title FROM user_channels WHERE user_chat_id = ? AND channel_id = ?;",
+                (user_chat_id, channel_id)
+            )
+            row = await cur.fetchone()
+            if row:
+                title = row[0]
+                await self.sqlite_conn.execute(
+                    "UPDATE users SET channel_id = ?, channel_title = ?, is_storage_active = 1 WHERE chat_id = ?;",
+                    (channel_id, title, user_chat_id)
+                )
+            await self.sqlite_conn.commit()
+            return True
+
+    async def remove_user_channel(self, user_chat_id: int, channel_id: int) -> Dict[str, Any]:
+        """
+        Unlink/delete a specific channel for a user.
+        Re-routes any platform routes pointing to this channel to the user's primary channel.
+        Promotes next channel to primary if the unlinked channel was primary.
+        """
+        if not self.is_connected:
+            return {"success": False, "re_routed": 0, "new_primary_id": None}
+
+        if self.is_postgres:
+            async def _run(conn):
+                # 1. Delete from user_channels
+                was_primary = await conn.fetchval(
+                    "SELECT is_primary FROM user_channels WHERE user_chat_id = $1 AND channel_id = $2;",
+                    user_chat_id, channel_id
+                )
+                await conn.execute(
+                    "DELETE FROM user_channels WHERE user_chat_id = $1 AND channel_id = $2;",
+                    user_chat_id, channel_id
+                )
+
+                # 2. Check remaining channels
+                remaining = await conn.fetch(
+                    "SELECT channel_id, channel_title FROM user_channels WHERE user_chat_id = $1 AND is_active = TRUE ORDER BY is_primary DESC, id ASC;",
+                    user_chat_id
+                )
+
+                new_primary_id = None
+                if remaining:
+                    if was_primary:
+                        new_primary_id = remaining[0]["channel_id"]
+                        await conn.execute(
+                            "UPDATE user_channels SET is_primary = (channel_id = $2) WHERE user_chat_id = $1;",
+                            user_chat_id, new_primary_id
+                        )
+                        await conn.execute(
+                            "UPDATE users SET channel_id = $1, channel_title = $2, is_storage_active = TRUE WHERE chat_id = $3;",
+                            new_primary_id, remaining[0]["channel_title"], user_chat_id
+                        )
+                    else:
+                        new_primary_id = await conn.fetchval(
+                            "SELECT channel_id FROM user_channels WHERE user_chat_id = $1 AND is_primary = TRUE LIMIT 1;",
+                            user_chat_id
+                        )
+                else:
+                    await conn.execute(
+                        "UPDATE users SET channel_id = NULL, channel_title = NULL, is_storage_active = FALSE WHERE chat_id = $1;",
+                        user_chat_id
+                    )
+
+                # 3. Re-route platform routes that were pointing to the removed channel
+                re_routed = 0
+                if new_primary_id:
+                    res = await conn.execute(
+                        "UPDATE user_platform_routes SET channel_id = $1 WHERE user_chat_id = $2 AND channel_id = $3;",
+                        new_primary_id, user_chat_id, channel_id
+                    )
+                    re_routed = int(res.split(" ")[-1]) if " " in res else 0
+                else:
+                    await conn.execute("DELETE FROM user_platform_routes WHERE user_chat_id = $1;", user_chat_id)
+
+                return {"success": True, "re_routed": re_routed, "new_primary_id": new_primary_id}
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur_p = await self.sqlite_conn.execute(
+                "SELECT is_primary FROM user_channels WHERE user_chat_id = ? AND channel_id = ?;",
+                (user_chat_id, channel_id)
+            )
+            row_p = await cur_p.fetchone()
+            was_primary = bool(row_p[0]) if row_p else False
+
+            await self.sqlite_conn.execute(
+                "DELETE FROM user_channels WHERE user_chat_id = ? AND channel_id = ?;",
+                (user_chat_id, channel_id)
+            )
+
+            cur_rem = await self.sqlite_conn.execute(
+                "SELECT channel_id, channel_title FROM user_channels WHERE user_chat_id = ? AND is_active = 1 ORDER BY is_primary DESC, id ASC;",
+                (user_chat_id,)
+            )
+            remaining = await cur_rem.fetchall()
+
+            new_primary_id = None
+            if remaining:
+                if was_primary:
+                    new_primary_id = remaining[0][0]
+                    await self.sqlite_conn.execute(
+                        "UPDATE user_channels SET is_primary = CASE WHEN channel_id = ? THEN 1 ELSE 0 END WHERE user_chat_id = ?;",
+                        (new_primary_id, user_chat_id)
+                    )
+                    await self.sqlite_conn.execute(
+                        "UPDATE users SET channel_id = ?, channel_title = ?, is_storage_active = 1 WHERE chat_id = ?;",
+                        (new_primary_id, remaining[0][1], user_chat_id)
+                    )
+                else:
+                    cur_prim = await self.sqlite_conn.execute(
+                        "SELECT channel_id FROM user_channels WHERE user_chat_id = ? AND is_primary = 1 LIMIT 1;",
+                        (user_chat_id,)
+                    )
+                    r_prim = await cur_prim.fetchone()
+                    new_primary_id = r_prim[0] if r_prim else remaining[0][0]
+            else:
+                await self.sqlite_conn.execute(
+                    "UPDATE users SET channel_id = NULL, channel_title = NULL, is_storage_active = 0 WHERE chat_id = ?;",
+                    (user_chat_id,)
+                )
+
+            re_routed = 0
+            if new_primary_id:
+                cur_up = await self.sqlite_conn.execute(
+                    "UPDATE user_platform_routes SET channel_id = ? WHERE user_chat_id = ? AND channel_id = ?;",
+                    (new_primary_id, user_chat_id, channel_id)
+                )
+                re_routed = cur_up.rowcount
+            else:
+                await self.sqlite_conn.execute("DELETE FROM user_platform_routes WHERE user_chat_id = ?;", (user_chat_id,))
+
+            await self.sqlite_conn.commit()
+            return {"success": True, "re_routed": re_routed, "new_primary_id": new_primary_id}
+
+    async def set_platform_route(self, user_chat_id: int, platform: str, channel_id: int) -> bool:
+        """Route all downloads from a specific platform to the given channel."""
+        if not self.is_connected:
+            return False
+
+        if self.is_postgres:
+            async def _run(conn):
+                await conn.execute(
+                    """
+                    INSERT INTO user_platform_routes (user_chat_id, platform, channel_id, updated_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (user_chat_id, platform) DO UPDATE SET
+                        channel_id = EXCLUDED.channel_id,
+                        updated_at = NOW();
+                    """,
+                    user_chat_id, platform, channel_id
+                )
+                return True
+            return await self._execute_pg_with_retry(_run)
+        else:
+            await self.sqlite_conn.execute(
+                """
+                INSERT INTO user_platform_routes (user_chat_id, platform, channel_id, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT (user_chat_id, platform) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    updated_at = datetime('now');
+                """,
+                (user_chat_id, platform, channel_id)
+            )
+            await self.sqlite_conn.commit()
+            return True
+
+    async def remove_platform_route(self, user_chat_id: int, platform: str) -> bool:
+        """Remove explicit platform route so it falls back to primary channel."""
+        if not self.is_connected:
+            return False
+
+        if self.is_postgres:
+            async def _run(conn):
+                await conn.execute("DELETE FROM user_platform_routes WHERE user_chat_id = $1 AND platform = $2;", user_chat_id, platform)
+                return True
+            return await self._execute_pg_with_retry(_run)
+        else:
+            await self.sqlite_conn.execute("DELETE FROM user_platform_routes WHERE user_chat_id = ? AND platform = ?;", (user_chat_id, platform))
+            await self.sqlite_conn.commit()
+            return True
+
+    async def get_platform_route(self, user_chat_id: int, platform: str) -> Optional[int]:
+        """Get explicitly routed channel_id for a platform."""
+        if not self.is_connected:
+            return None
+
+        if self.is_postgres:
+            async def _run(conn):
+                val = await conn.fetchval(
+                    "SELECT channel_id FROM user_platform_routes WHERE user_chat_id = $1 AND platform = $2;",
+                    user_chat_id, platform
+                )
+                return int(val) if val is not None else None
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute(
+                "SELECT channel_id FROM user_platform_routes WHERE user_chat_id = ? AND platform = ?;",
+                (user_chat_id, platform)
+            )
+            row = await cur.fetchone()
+            return int(row[0]) if (row and row[0] is not None) else None
+
+    async def get_all_platform_routes(self, user_chat_id: int) -> Dict[str, int]:
+        """Return dict of {platform: channel_id} for a user."""
+        if not self.is_connected:
+            return {}
+
+        if self.is_postgres:
+            async def _run(conn):
+                rows = await conn.fetch(
+                    "SELECT platform, channel_id FROM user_platform_routes WHERE user_chat_id = $1;",
+                    user_chat_id
+                )
+                return {r["platform"]: int(r["channel_id"]) for r in rows}
+            return await self._execute_pg_with_retry(_run)
+        else:
+            cur = await self.sqlite_conn.execute(
+                "SELECT platform, channel_id FROM user_platform_routes WHERE user_chat_id = ?;",
+                (user_chat_id,)
+            )
+            rows = await cur.fetchall()
+            return {r[0]: int(r[1]) for r in rows}
+
+    async def get_destination_channel(self, user_chat_id: int, platform: str) -> Optional[int]:
+        """
+        Resolve destination channel ID:
+        1. Check explicit platform route (if channel still active).
+        2. Primary channel from user_channels.
+        3. Any active channel from user_channels.
+        4. Fallback to users.channel_id.
+        """
+        # 1. Check explicit platform route
+        routed_cid = await self.get_platform_route(user_chat_id, platform)
+        if routed_cid:
+            channels = await self.get_user_channels(user_chat_id)
+            if any(c["channel_id"] == routed_cid for c in channels):
+                return routed_cid
+
+        # 2. Check primary channel in user_channels
+        channels = await self.get_user_channels(user_chat_id)
+        if channels:
+            primary = next((c for c in channels if c.get("is_primary")), channels[0])
+            return primary["channel_id"]
+
+        # 3. Fallback to users.channel_id
+        user_info = await self.get_user_channel(user_chat_id)
+        if user_info and user_info.get("channel_id") and user_info.get("is_storage_active"):
+            return user_info["channel_id"]
+
+        return None
 
     # ── Decentralized Multi-Node Media Storage ────────────────────────────
 
@@ -606,11 +1173,15 @@ class Database:
         channel_post_url: str,
         track_id: str,
         quality: str,
-        telegram_file_id: Optional[str] = None
+        telegram_file_id: Optional[str] = None,
+        platform: str = "youtube",
+        destination_channel_id: Optional[int] = None
     ) -> None:
         """Register newly posted or replicated media in a user's channel."""
         if not self.is_connected:
             return
+
+        dest_id = destination_channel_id or channel_id
 
         if self.is_postgres:
             async def _run(conn):
@@ -618,18 +1189,20 @@ class Database:
                     """
                     INSERT INTO user_media_storage (
                         user_chat_id, channel_id, channel_msg_id, channel_post_url,
-                        track_id, quality, telegram_file_id, is_available, created_at
+                        track_id, quality, telegram_file_id, is_available, platform, destination_channel_id, created_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, NOW())
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, NOW())
                     ON CONFLICT (user_chat_id, track_id, quality) DO UPDATE SET
                         channel_id = EXCLUDED.channel_id,
                         channel_msg_id = EXCLUDED.channel_msg_id,
                         channel_post_url = EXCLUDED.channel_post_url,
                         telegram_file_id = COALESCE(EXCLUDED.telegram_file_id, user_media_storage.telegram_file_id),
+                        platform = EXCLUDED.platform,
+                        destination_channel_id = EXCLUDED.destination_channel_id,
                         is_available = TRUE,
                         created_at = NOW();
                     """,
-                    user_chat_id, channel_id, channel_msg_id, channel_post_url, track_id, quality, telegram_file_id
+                    user_chat_id, channel_id, channel_msg_id, channel_post_url, track_id, quality, telegram_file_id, platform, dest_id
                 )
             await self._execute_pg_with_retry(_run)
         else:
@@ -637,18 +1210,20 @@ class Database:
                 """
                 INSERT INTO user_media_storage (
                     user_chat_id, channel_id, channel_msg_id, channel_post_url,
-                    track_id, quality, telegram_file_id, is_available, created_at
+                    track_id, quality, telegram_file_id, is_available, platform, destination_channel_id, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))
                 ON CONFLICT (user_chat_id, track_id, quality) DO UPDATE SET
                     channel_id = excluded.channel_id,
                     channel_msg_id = excluded.channel_msg_id,
                     channel_post_url = excluded.channel_post_url,
                     telegram_file_id = coalesce(excluded.telegram_file_id, user_media_storage.telegram_file_id),
+                    platform = excluded.platform,
+                    destination_channel_id = excluded.destination_channel_id,
                     is_available = 1,
                     created_at = datetime('now');
                 """,
-                (user_chat_id, channel_id, channel_msg_id, channel_post_url, track_id, quality, telegram_file_id)
+                (user_chat_id, channel_id, channel_msg_id, channel_post_url, track_id, quality, telegram_file_id, platform, dest_id)
             )
             await self.sqlite_conn.commit()
 
@@ -1194,12 +1769,13 @@ class Database:
         if not self.is_connected:
             return None
 
+        user_dict = None
         if self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     """
                     SELECT u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
-                           u.is_storage_active, u.terms_accepted, u.is_admin, u.is_banned, u.created_at, u.last_active,
+                           u.is_storage_active, u.terms_accepted, u.is_admin, u.is_banned, u.max_channels, u.created_at, u.last_active,
                            (SELECT COUNT(*) FROM user_media_storage s WHERE s.user_chat_id = u.chat_id AND s.is_available = TRUE) AS vault_count,
                            (SELECT COUNT(*) FROM download_history h WHERE h.user_chat_id = u.chat_id) AS download_count
                     FROM users u
@@ -1208,12 +1784,12 @@ class Database:
                     chat_id
                 )
                 return dict(row) if row else None
-            return await self._execute_pg_with_retry(_run)
+            user_dict = await self._execute_pg_with_retry(_run)
         else:
             cur = await self.sqlite_conn.execute(
                 """
                 SELECT u.chat_id, u.username, u.first_name, u.channel_id, u.channel_title,
-                       u.is_storage_active, u.terms_accepted, u.is_admin, u.is_banned, u.created_at, u.last_active,
+                       u.is_storage_active, u.terms_accepted, u.is_admin, u.is_banned, u.max_channels, u.created_at, u.last_active,
                        (SELECT COUNT(*) FROM user_media_storage s WHERE s.user_chat_id = u.chat_id AND s.is_available = 1) AS vault_count,
                        (SELECT COUNT(*) FROM download_history h WHERE h.user_chat_id = u.chat_id) AS download_count
                 FROM users u
@@ -1228,8 +1804,13 @@ class Database:
                 d["terms_accepted"] = bool(d.get("terms_accepted", 0))
                 d["is_admin"] = bool(d.get("is_admin", 0))
                 d["is_banned"] = bool(d.get("is_banned", 0))
-                return d
-            return None
+                user_dict = d
+
+        if user_dict:
+            user_dict["max_channels"] = int(user_dict.get("max_channels") or 5)
+            user_dict["channels"] = await self.get_user_channels(chat_id)
+            user_dict["routes"] = await self.get_all_platform_routes(chat_id)
+        return user_dict
 
     async def get_user_vault_tracks(
         self,
@@ -1328,9 +1909,13 @@ class Database:
             await self.sqlite_conn.commit()
             return bool(new_val)
 
-    async def force_unlink_user_channel(self, chat_id: int) -> None:
-        """Forcefully disconnect a user's storage channel and mark their stored media inactive."""
+    async def force_unlink_user_channel(self, chat_id: int, channel_id: Optional[int] = None) -> None:
+        """Forcefully disconnect a user's storage channel(s) and clean up routes."""
         if not self.is_connected:
+            return
+
+        if channel_id:
+            await self.remove_user_channel(chat_id, channel_id)
             return
 
         if self.is_postgres:
@@ -1339,6 +1924,8 @@ class Database:
                     "UPDATE users SET channel_id = NULL, channel_title = NULL, is_storage_active = FALSE WHERE chat_id = $1;",
                     chat_id
                 )
+                await conn.execute("DELETE FROM user_channels WHERE user_chat_id = $1;", chat_id)
+                await conn.execute("DELETE FROM user_platform_routes WHERE user_chat_id = $1;", chat_id)
                 await conn.execute(
                     "UPDATE user_media_storage SET is_available = FALSE WHERE user_chat_id = $1;",
                     chat_id
@@ -1349,6 +1936,8 @@ class Database:
                 "UPDATE users SET channel_id = NULL, channel_title = NULL, is_storage_active = 0 WHERE chat_id = ?;",
                 (chat_id,)
             )
+            await self.sqlite_conn.execute("DELETE FROM user_channels WHERE user_chat_id = ?;", (chat_id,))
+            await self.sqlite_conn.execute("DELETE FROM user_platform_routes WHERE user_chat_id = ?;", (chat_id,))
             await self.sqlite_conn.execute(
                 "UPDATE user_media_storage SET is_available = 0 WHERE user_chat_id = ?;",
                 (chat_id,)

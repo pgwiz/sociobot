@@ -249,14 +249,171 @@ def test_bot_syntax():
     return True
 
 
+def test_platform_detection():
+    """Verify platform detection, URL regex, and quality presets for all 9 platforms."""
+    logger.info("\n─── 5. Testing Platform Detector & Media Presets ───")
+    from bot.utils.platform import (
+        detect_platform_and_url,
+        get_quality_for_platform,
+        is_social_video,
+        get_platform_display_name,
+        get_platform_icon,
+        SUPPORTED_PLATFORMS
+    )
+
+    test_cases = [
+        ("Check this https://www.youtube.com/watch?v=dQw4w9WgXcQ", "youtube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+        ("https://youtu.be/dQw4w9WgXcQ", "youtube", "https://youtu.be/dQw4w9WgXcQ"),
+        ("Listen to https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT", "spotify", "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"),
+        ("Funny clip https://www.tiktok.com/@user/video/1234567890", "tiktok", "https://www.tiktok.com/@user/video/1234567890"),
+        ("https://vm.tiktok.com/ZM8ABCDEF/", "tiktok", "https://vm.tiktok.com/ZM8ABCDEF/"),
+        ("Look at this reel https://www.instagram.com/reel/C0abcdef123/", "instagram", "https://www.instagram.com/reel/C0abcdef123/"),
+        ("https://x.com/user/status/1234567890", "twitter", "https://x.com/user/status/1234567890"),
+        ("https://twitter.com/user/status/1234567890", "twitter", "https://twitter.com/user/status/1234567890"),
+        ("https://www.reddit.com/r/funny/comments/123456/title/", "reddit", "https://www.reddit.com/r/funny/comments/123456/title/"),
+        ("https://soundcloud.com/artist/track-name", "soundcloud", "https://soundcloud.com/artist/track-name"),
+        ("https://artist.bandcamp.com/track/track-name", "bandcamp", "https://artist.bandcamp.com/track/track-name"),
+        ("https://vimeo.com/12345678", "vimeo", "https://vimeo.com/12345678"),
+        ("https://example.com/some/video.mp4", "other", "https://example.com/some/video.mp4"),
+        ("Coldplay viva la vida song search", None, None),
+    ]
+
+    for text, expected_platform, expected_url in test_cases:
+        p, u = detect_platform_and_url(text)
+        assert p == expected_platform, f"For '{text}', expected platform '{expected_platform}', got '{p}'"
+        assert u == expected_url, f"For '{text}', expected URL '{expected_url}', got '{u}'"
+
+    # Social video qualities
+    assert get_quality_for_platform("tiktok") == "saver"
+    assert get_quality_for_platform("instagram") == "saver"
+    assert get_quality_for_platform("twitter") == "saver"
+    assert get_quality_for_platform("reddit") == "saver"
+    assert is_social_video("tiktok") is True
+    assert is_social_video("spotify") is False
+
+    # Music qualities
+    assert get_quality_for_platform("spotify") == "audio_high"
+    assert get_quality_for_platform("soundcloud") == "audio_high"
+    assert get_quality_for_platform("bandcamp") == "audio_high"
+
+    logger.info(f"✓ All {len(test_cases)} platform detector cases passed with correct quality mapping.")
+    return True
+
+
+async def test_multi_channel_and_routing():
+    """Verify multi-channel vaults, quota enforcement, and platform routing fallback."""
+    logger.info("\n─── 6. Testing Multi-Channel Vaults & Platform Routing ───")
+    from bot.database import Database
+    from bot.config import settings
+
+    test_db_path = "test_routing.db"
+    if os.path.exists(test_db_path):
+        os.remove(test_db_path)
+
+    orig_url = settings.DATABASE_URL
+    orig_path = settings.DATABASE_PATH
+    settings.DATABASE_URL = f"sqlite:///{test_db_path}"
+    settings.DATABASE_PATH = test_db_path
+
+    test_db = Database()
+    try:
+        await test_db.connect()
+
+        user_id = 777888
+        await test_db.get_or_create_user(chat_id=user_id, username="multitester")
+
+        # 1. Quota default is 5
+        max_ch = await test_db.get_user_max_channels(user_id)
+        assert max_ch == 5, f"Expected default quota 5, got {max_ch}"
+
+        # 2. Add 5 channels
+        for i in range(1, 6):
+            res = await test_db.add_user_channel(user_id, -1001000 - i, f"Vault {i}")
+            if i == 1:
+                assert res["is_primary"] is True
+
+        channels = await test_db.get_user_channels(user_id)
+        assert len(channels) == 5
+        assert channels[0]["channel_id"] == -1001001
+        assert channels[0]["is_primary"] is True
+        logger.info("✓ 5 channels added; channel 1 automatically set as primary.")
+
+        # 3. Adding 6th channel must raise ValueError (quota exceeded)
+        quota_exceeded = False
+        try:
+            await test_db.add_user_channel(user_id, -1001007, "Vault 7")
+        except ValueError as e:
+            quota_exceeded = True
+            logger.info(f"✓ Quota enforcement verified: {e}")
+        assert quota_exceeded, "Expected ValueError when exceeding quota 5"
+
+        # 4. Admin upgrades quota to 10
+        await test_db.upgrade_user_quota(user_id, 10)
+        assert await test_db.get_user_max_channels(user_id) == 10
+        # Adding 6th channel now succeeds
+        await test_db.add_user_channel(user_id, -1001007, "Vault 7")
+        assert len(await test_db.get_user_channels(user_id)) == 6
+        logger.info("✓ Quota upgrade to 10 verified; 6th channel linked successfully.")
+
+        # 5. Platform routing
+        await test_db.set_platform_route(user_id, "spotify", -1001001)
+        await test_db.set_platform_route(user_id, "tiktok", -1001002)
+
+        # Spotify goes to -1001001
+        dest_sp = await test_db.get_destination_channel(user_id, "spotify")
+        assert dest_sp == -1001001
+
+        # TikTok goes to -1001002
+        dest_tt = await test_db.get_destination_channel(user_id, "tiktok")
+        assert dest_tt == -1001002
+
+        # Unrouted platform (youtube) falls back to primary (-1001001)
+        dest_yt = await test_db.get_destination_channel(user_id, "youtube")
+        assert dest_yt == -1001001
+        logger.info("✓ Destination channel resolution verified for routed and unrouted platforms.")
+
+        # 6. Unlink channel -1001002 (TikTok destination) -> verify fallback to primary
+        del_res = await test_db.remove_user_channel(user_id, -1001002)
+        assert del_res["re_routed"] >= 1
+        assert del_res["new_primary_id"] == -1001001
+
+        # TikTok should now resolve to primary (-1001001)
+        dest_tt_after = await test_db.get_destination_channel(user_id, "tiktok")
+        assert dest_tt_after == -1001001
+        logger.info("✓ Channel unlinking automatic fallback to primary verified.")
+
+        # 7. Switch primary to -1001003
+        await test_db.set_primary_channel(user_id, -1001003)
+        channels = await test_db.get_user_channels(user_id)
+        assert channels[0]["channel_id"] == -1001003
+        assert channels[0]["is_primary"] is True
+        dest_fallback = await test_db.get_destination_channel(user_id, "reddit")
+        assert dest_fallback == -1001003
+        logger.info("✓ Primary channel switching verified.")
+
+    finally:
+        await test_db.disconnect()
+        settings.DATABASE_URL = orig_url
+        settings.DATABASE_PATH = orig_path
+        if os.path.exists(test_db_path):
+            try:
+                os.remove(test_db_path)
+            except Exception:
+                pass
+
+    return True
+
+
 async def main():
     logger.info("=== Starting Sociobot Verification Suite ===\n")
     api_ok = await test_api_integration()
     db_ok = await test_database_engine()
     pg_schema_ok = await test_postgres_schema_isolation()
     syntax_ok = test_bot_syntax()
+    platform_ok = test_platform_detection()
+    multi_ch_ok = await test_multi_channel_and_routing()
 
-    if api_ok and db_ok and pg_schema_ok and syntax_ok:
+    if api_ok and db_ok and pg_schema_ok and syntax_ok and platform_ok and multi_ch_ok:
         logger.info("\n🎉 ALL SOCIOBOT VERIFICATION TESTS PASSED SUCCESSFULLY!")
         sys.exit(0)
     else:
