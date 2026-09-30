@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-09-30
+
+### Fixed
+- **Telegram 64-byte Callback Length Limit (`BUTTON_DATA_INVALID`):**
+  - Implemented URL tokenization engine (`bot.utils.track_ref`) mapping long URLs to deterministic 16-hex references with multi-tier cache persistence.
+  - All callback data payloads (`cb:del:...`, `cb:force:...`, `cb:extract_audio:...`, `cb:dl:...`) now remain strictly <= 36 bytes (well under the 64-byte limit).
+  - Added seamless bidirectional resolution (`resolve_track_ref`) across delete, force re-download, format selection, and audio extraction handlers.
+- **Social Video Blank Screen & Missing Audio Streams:**
+  - Updated `get_quality_for_platform` for social video platforms (Instagram, TikTok, Twitter/X, Reddit) to `"360p"` (instead of `"saver"`), ensuring both video and audio streams are downloaded.
+  - Added `has_video_stream` stream integrity check via `ffprobe` and container validation in `bot/downloader.py` and before `bot.send_video()` in `bot/handlers/download.py`.
+  - Discard corrupt/audio-only containers early so fallback mechanisms can fetch valid video streams.
+  - Updated `GENERIC_QUALITY_MAP['saver']` in `org-yt-dl` to `'b[height<=480]/b[height<=360]/worst[ext=mp4]/worst'`.
+
 ## [2.0.0] - 2026-09-30
 
 ### Added

@@ -214,6 +214,7 @@ async def cb_channel_toggle_platform(callback: CallbackQuery):
 
 
 from bot.cache import cache
+from bot.utils.track_ref import register_track_ref, resolve_track_ref
 
 
 @router.callback_query(F.data.startswith("cb:route_pick:"))
@@ -223,23 +224,49 @@ async def cb_channel_route_pick(callback: CallbackQuery, bot: Bot):
     parts = callback.data.split(":")
     platform = parts[2]
     channel_id = int(parts[3])
+    token = parts[4] if len(parts) > 4 else None
 
     # Save platform preference
     await db.set_platform_route(user_id, platform, channel_id)
     await callback.answer(f"Saved! {get_platform_display_name(platform)} routed to selected channel.")
 
-    pending = await cache.get(f"pending_route_dl:{user_id}")
-    track_id = None
-    quality = "saver"
-    if pending and pending.get("platform") == platform:
-        track_id = pending.get("url")
-        quality = pending.get("quality", "saver")
-        await cache.delete(f"pending_route_dl:{user_id}")
-    elif len(parts) > 4:
-        track_id = parts[4]
-        quality = parts[5] if len(parts) > 5 else "saver"
+    pending = None
+    if token:
+        pending = await cache.get(f"pending_route_dl:{token}")
+        if pending:
+            await cache.delete(f"pending_route_dl:{token}")
+
+    if not pending:
+        # Fallback for backward compatibility if key was stored per user
+        pending = await cache.get(f"pending_route_dl:{user_id}")
+        if pending and pending.get("platform") == platform:
+            await cache.delete(f"pending_route_dl:{user_id}")
+
+    track_id = pending.get("url") if pending else None
+    quality = pending.get("quality", "360p") if pending else "360p"
+    if quality == "saver":
+        quality = "360p"
+
+    # If token was passed directly without cache hit, resolve via resolve_track_ref
+    if not track_id and token:
+        resolved = await resolve_track_ref(token)
+        if resolved != token:
+            track_id = resolved
 
     if track_id:
+        if platform == "youtube":
+            from bot.keyboards.inline import get_format_picker_keyboard
+            ref = await register_track_ref(track_id)
+            kb = get_format_picker_keyboard(ref)
+            await callback.message.edit_text(
+                f"✅ <b>Routed YouTube to selected vault!</b>\n\n"
+                f"🔗 <code>{track_id}</code>\n\n"
+                f"Choose download format:",
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            return
+
         status_msg = await callback.message.edit_text(
             f"⏳ <b>Starting {get_platform_display_name(platform)} download...</b>",
             parse_mode="HTML"

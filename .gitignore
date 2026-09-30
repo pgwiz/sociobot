@@ -17,3 +17,4 @@ sessions/
 *.db-shm
 .DS_Store
 Thumbs.db
+*.mp4

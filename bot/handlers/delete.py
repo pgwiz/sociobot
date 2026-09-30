@@ -12,6 +12,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 from bot.database import db
+from bot.utils.track_ref import resolve_track_ref
 
 logger = logging.getLogger(__name__)
 router = Router(name="delete")
@@ -22,11 +23,14 @@ async def cb_delete_media(callback: CallbackQuery, bot: Bot):
     """Handle instant interactive deletion from user's channel and database."""
     user_id = callback.from_user.id
     parts = callback.data.split(":")
-    track_id = parts[2]
+    raw_track_id = parts[2]
     quality = parts[3] if len(parts) > 3 else None
+    track_id = await resolve_track_ref(raw_track_id)
 
     # Delete records from DB and get channel message reference
     deleted_items = await db.delete_user_media(user_id, track_id, quality)
+    if not deleted_items and track_id != raw_track_id:
+        deleted_items = await db.delete_user_media(user_id, raw_track_id, quality)
 
     # Physically delete message from user's channel
     deleted_channel_posts = 0
@@ -65,8 +69,11 @@ async def cmd_delete(message: Message, bot: Bot):
         await message.answer("Usage: <code>/delete &lt;track_id&gt;</code> (or check /history for IDs)", parse_mode="HTML")
         return
 
-    track_id = parts[1].strip().lstrip("#")
+    raw_track_id = parts[1].strip().lstrip("#")
+    track_id = await resolve_track_ref(raw_track_id)
     deleted_items = await db.delete_user_media(user_id, track_id)
+    if not deleted_items and track_id != raw_track_id:
+        deleted_items = await db.delete_user_media(user_id, raw_track_id)
 
     if not deleted_items:
         await message.answer(f"⚠️ Track <code>{track_id}</code> was not found in your library.", parse_mode="HTML")

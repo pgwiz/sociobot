@@ -102,7 +102,9 @@ async def cb_track_select(callback: CallbackQuery):
     if duration:
         info_str += f"\n⏱️ {duration}"
 
-    kb = get_format_picker_keyboard(track_id)
+    from bot.utils.track_ref import register_track_ref
+    ref = await register_track_ref(track_id)
+    kb = get_format_picker_keyboard(ref)
     await callback.message.edit_text(
         f"{info_str}\n\n<b>Choose download format:</b>",
         parse_mode="HTML",

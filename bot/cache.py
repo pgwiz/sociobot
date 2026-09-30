@@ -50,17 +50,33 @@ class TwoTierCache:
         logger.debug(f"[CACHE MISS] {key}")
         return None
 
-    async def set(self, key: str, data: Any, ttl_seconds: int) -> None:
+    async def set(self, key: str, data: Any, ttl_seconds: Optional[int] = None, ttl: Optional[int] = None) -> None:
         """Store key in both RAM and database."""
+        effective_ttl = ttl if ttl is not None else (ttl_seconds if ttl_seconds is not None else 86400)
         if self.enabled:
             self._ram_cache[key] = data
 
         if db.is_connected:
             try:
-                await db.set_api_cache(key, data, ttl_seconds)
-                logger.debug(f"[CACHE SET] {key} (TTL: {ttl_seconds}s)")
+                await db.set_api_cache(key, data, effective_ttl)
+                logger.debug(f"[CACHE SET] {key} (TTL: {effective_ttl}s)")
             except Exception as e:
                 logger.warning(f"Error persisting cache to DB for {key}: {e}")
+
+    async def delete(self, key: str) -> None:
+        """Delete key from RAM and database."""
+        if self.enabled and key in self._ram_cache:
+            try:
+                del self._ram_cache[key]
+            except KeyError:
+                pass
+
+        if db.is_connected:
+            try:
+                await db.delete_api_cache(key)
+                logger.debug(f"[CACHE DEL] {key}")
+            except Exception as e:
+                logger.warning(f"Error deleting cache key {key} from DB: {e}")
 
     def clear_ram(self) -> None:
         """Clear the in-memory cache."""

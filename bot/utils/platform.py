@@ -1,19 +1,8 @@
 """Platform Detector and Media Routing Utilities for Sociobot."""
 
 import re
+from urllib.parse import urlparse
 from typing import Optional, Tuple, Dict
-
-PLATFORM_PATTERNS = [
-    ("youtube",    re.compile(r"(?:youtube\.com|youtu\.be)", re.I)),
-    ("spotify",    re.compile(r"open\.spotify\.com", re.I)),
-    ("tiktok",     re.compile(r"(?:tiktok\.com|vm\.tiktok\.com)", re.I)),
-    ("instagram",  re.compile(r"(?:instagram\.com|instagr\.am)", re.I)),
-    ("twitter",    re.compile(r"(?:(?:^|[\b/])(?:www\.)?(?:twitter\.com|x\.com)|(?:^|[\b/])t\.co)(?:/|$|\?)", re.I)),
-    ("reddit",     re.compile(r"(?:reddit\.com|redd\.it)", re.I)),
-    ("soundcloud", re.compile(r"soundcloud\.com", re.I)),
-    ("bandcamp",   re.compile(r"bandcamp\.com", re.I)),
-    ("vimeo",      re.compile(r"vimeo\.com", re.I)),
-]
 
 SOCIAL_VIDEO_PLATFORMS = {"tiktok", "instagram", "twitter", "reddit"}
 MUSIC_PLATFORMS        = {"spotify", "soundcloud", "bandcamp"}
@@ -44,26 +33,52 @@ PLATFORM_META: Dict[str, Dict[str, str]] = {
 
 
 def detect_platform_and_url(text: str) -> Tuple[Optional[str], Optional[str]]:
-    """Extract first URL and identify its platform. Returns (platform, url)."""
+    """
+    Extract first URL and identify its platform using exact domain/host parsing.
+    Returns (platform, url) or (None, None) if no URL is present.
+    """
     match = URL_RE.search(text)
     if not match:
         return None, None
     url = match.group(0)
-    for platform, pattern in PLATFORM_PATTERNS:
-        if pattern.search(url):
-            return platform, url
+
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return "other", url
+
+    if host in ("youtube.com", "youtu.be") or host.endswith(".youtube.com"):
+        return "youtube", url
+    if host in ("spotify.com", "spotify.link") or host.endswith((".spotify.com", ".spotify.link")):
+        return "spotify", url
+    if host in ("tiktok.com",) or host.endswith(".tiktok.com"):
+        return "tiktok", url
+    if host in ("instagram.com", "instagr.am") or host.endswith((".instagram.com", ".instagr.am")):
+        return "instagram", url
+    if host in ("twitter.com", "x.com", "t.co") or host.endswith((".twitter.com", ".x.com")):
+        return "twitter", url
+    if host in ("reddit.com", "redd.it") or host.endswith((".reddit.com", ".redd.it")):
+        return "reddit", url
+    if host in ("soundcloud.com",) or host.endswith(".soundcloud.com"):
+        return "soundcloud", url
+    if host in ("bandcamp.com",) or host.endswith(".bandcamp.com"):
+        return "bandcamp", url
+    if host in ("vimeo.com",) or host.endswith(".vimeo.com"):
+        return "vimeo", url
+
     return "other", url
 
 
 def get_quality_for_platform(platform: str) -> str:
     """Return appropriate quality preset for the platform."""
     if platform in SOCIAL_VIDEO_PLATFORMS:
-        return "saver"       # lowest video quality
+        return "360p"       # 360p ensures both video and audio streams
     if platform in MUSIC_PLATFORMS:
         return "audio_high"  # 320k MP3
     if platform == "youtube":
         return "audio_high"  # default for YouTube audio
-    return "saver"
+    return "360p"
 
 
 def is_social_video(platform: str) -> bool:

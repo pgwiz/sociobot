@@ -35,7 +35,58 @@ def parse_duration_seconds(duration_val: Any) -> int:
             return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
     except ValueError:
         return 0
-    return 0
+VIDEO_QUALITIES = {"720p", "360p", "480p", "best", "video", "saver", "sd", "hd", "video_hd", "video_480p"}
+
+
+def is_video_quality(quality: str) -> bool:
+    """Return True if the quality string denotes video output."""
+    if not quality:
+        return False
+    q = quality.lower().strip()
+    return q in VIDEO_QUALITIES or "video" in q or (q.endswith("p") and q[:-1].isdigit())
+
+
+async def has_video_stream(file_path: str) -> bool:
+    """
+    Verify that the media file contains at least one valid video stream using ffprobe
+    or binary container validation fallback.
+    """
+    if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) < 1000:
+        return False
+
+    ffprobe_bin = shutil.which("ffprobe")
+    if ffprobe_bin:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                ffprobe_bin,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                file_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            codec = stdout.decode().strip()
+            if codec:
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"ffprobe validation failed for {file_path}: {e}")
+
+    # Fallback: Binary inspection of container for video tracks
+    try:
+        with open(file_path, "rb") as f:
+            chunk = f.read(1024 * 1024 * 4)  # Read first 4MB
+            # MP4/QuickTime handler type for video track is b"vide"
+            # Matroska/WebM TrackType element \x83\x01 (TrackType: Video=1, Audio=2)
+            if b"vide" in chunk or b"\x83\x01" in chunk:
+                return True
+    except Exception as e:
+        logger.warning(f"Container inspection fallback failed for {file_path}: {e}")
+
+    return False
 
 
 class Downloader:
@@ -82,10 +133,10 @@ class Downloader:
         quality: str
     ) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
         """Download track directly from stream extractor API with audio/video format integrity."""
-        is_video_quality = quality in ("720p", "360p", "best", "video", "saver")
+        is_video = is_video_quality(quality)
 
         # 1. For Audio: Prioritize /download endpoint (pre-packaged pure MP3 with ID3 tags)
-        if not is_video_quality:
+        if not is_video:
             try:
                 target_url_or_id = identifier if "http" in identifier else f"https://www.youtube.com/watch?v={identifier}"
                 logger.info(f"Requesting pre-packaged MP3 from /download for {target_url_or_id}")
@@ -146,7 +197,7 @@ class Downloader:
                 temp_raw_path = str(self.download_dir / f"{task_id}.raw")
 
                 try:
-                    logger.info(f"Streaming {'video' if is_video_quality else 'audio'} from API: {target_url}")
+                    logger.info(f"Streaming {'video' if is_video else 'audio'} from API: {target_url}")
                     stream_timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=30.0)
                     async with httpx.AsyncClient(timeout=stream_timeout, follow_redirects=True) as stream_client:
                         async with stream_client.stream("GET", target_url) as response:
@@ -168,9 +219,19 @@ class Downloader:
                         with open(temp_raw_path, "rb") as rf:
                             head = rf.read(16)
 
-                        if is_video_quality:
+                        if is_video:
                             final_video_path = str(self.download_dir / f"{task_id}.mp4")
                             os.replace(temp_raw_path, final_video_path)
+
+                            # Validate that downloaded file actually contains a video stream!
+                            if not await has_video_stream(final_video_path):
+                                logger.warning(
+                                    f"API stream for {identifier} (quality: {quality}) "
+                                    f"does not contain a valid video stream! Discarding for fallback."
+                                )
+                                self.cleanup_files(final_video_path, thumb_path)
+                                return None, None, {}
+
                             metadata = {
                                 "title": title,
                                 "artist": artist,
@@ -263,12 +324,14 @@ class Downloader:
         import yt_dlp
 
         task_id = uuid.uuid4().hex[:8]
-        is_video_quality = quality in ("720p", "360p", "best", "video", "saver")
+        is_video = is_video_quality(quality)
         outtmpl = str(self.download_dir / f"{task_id}.%(ext)s")
 
         if quality == "saver":
-            fmt = "worstvideo[ext=mp4]+worstaudio/worst[ext=mp4]/worst"
-        elif is_video_quality:
+            fmt = "b[height<=480]/b[height<=360]/worst[ext=mp4]/worst"
+        elif quality == "360p":
+            fmt = "bestvideo[height<=360]+bestaudio/best[height<=360]/best"
+        elif is_video:
             fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]"
         else:
             fmt = "bestaudio/best"
@@ -281,7 +344,7 @@ class Downloader:
             "writethumbnail": True,
         }
 
-        if not is_video_quality and shutil.which("ffmpeg"):
+        if not is_video and shutil.which("ffmpeg"):
             ydl_opts["postprocessors"] = [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
@@ -301,7 +364,7 @@ class Downloader:
         if not info:
             return None, None, {}
 
-        ext = "mp4" if is_video_quality else ("mp3" if shutil.which("ffmpeg") else info.get("ext", "m4a"))
+        ext = "mp4" if is_video else ("mp3" if shutil.which("ffmpeg") else info.get("ext", "m4a"))
         file_path = str(self.download_dir / f"{task_id}.{ext}")
 
         thumb_path = None
@@ -311,13 +374,19 @@ class Downloader:
                 thumb_path = cand
                 break
 
+        if is_video:
+            if not await has_video_stream(file_path):
+                logger.error(f"Fallback yt-dlp file {file_path} for {identifier} does not contain a valid video stream!")
+                self.cleanup_files(file_path, thumb_path)
+                return None, None, {}
+
         metadata = {
             "title": info.get("title", "Unknown Title"),
             "artist": info.get("uploader", "Unknown Artist"),
             "duration": info.get("duration", 0),
             "videoId": info.get("id", identifier),
             "source": "yt-dlp",
-            "is_video": is_video_quality,
+            "is_video": is_video,
             "quality": quality
         }
 

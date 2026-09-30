@@ -1440,6 +1440,19 @@ class Database:
             )
             await self.sqlite_conn.commit()
 
+    async def delete_api_cache(self, cache_key: str) -> None:
+        """Remove a cached key from database."""
+        if not self.is_connected:
+            return
+
+        if self.is_postgres:
+            async def _run(conn):
+                await conn.execute("DELETE FROM api_cache WHERE cache_key = $1;", cache_key)
+            await self._execute_pg_with_retry(_run)
+        else:
+            await self.sqlite_conn.execute("DELETE FROM api_cache WHERE cache_key = ?;", (cache_key,))
+            await self.sqlite_conn.commit()
+
     # ── Download History & Rate Limiting ──────────────────────────────────
 
     async def log_download(

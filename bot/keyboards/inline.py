@@ -3,6 +3,7 @@
 from typing import List, Dict, Any, Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.utils.platform import SUPPORTED_PLATFORMS, get_platform_display_name, get_platform_icon
+from bot.utils.track_ref import create_track_ref
 
 
 def format_channel_post_url(channel_id: int, message_id: int) -> str:
@@ -76,11 +77,12 @@ def get_search_results_keyboard(results: List[Dict[str, Any]], query: str) -> In
 
 def get_format_picker_keyboard(track_id: str, query: Optional[str] = None) -> InlineKeyboardMarkup:
     """2-Step format selector: Audio vs Video."""
+    ref = create_track_ref(track_id)
     back_data = f"cb:back_search:{query[:20]}" if query else "cb:close"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🎵 Audio (MP3 320k)", callback_data=f"cb:dl:{track_id}:audio_high"),
-            InlineKeyboardButton(text="🎬 Video (720p HD)", callback_data=f"cb:dl:{track_id}:720p")
+            InlineKeyboardButton(text="🎵 Audio (MP3 320k)", callback_data=f"cb:dl:{ref}:audio_high"),
+            InlineKeyboardButton(text="🎬 Video (720p HD)", callback_data=f"cb:dl:{ref}:720p")
         ],
         [
             InlineKeyboardButton(text="⬅️ Back", callback_data=back_data),
@@ -102,6 +104,7 @@ def get_media_delivery_keyboard(
     3. Interactive delete button to purge from user's channel and DB.
     4. Force re-download button.
     """
+    ref = create_track_ref(track_id)
     rows = [
         [
             InlineKeyboardButton(text="📂 Open in Channel", url=channel_post_url)
@@ -109,11 +112,11 @@ def get_media_delivery_keyboard(
     ]
     if show_extract_audio:
         rows.append([
-            InlineKeyboardButton(text="🎵 Extract Audio", callback_data=f"cb:extract_audio:{track_id}")
+            InlineKeyboardButton(text="🎵 Extract Audio", callback_data=f"cb:extract_audio:{ref}")
         ])
     rows.append([
-        InlineKeyboardButton(text="🗑️ Delete", callback_data=f"cb:del:{track_id}:{quality}"),
-        InlineKeyboardButton(text="⚡ Force Re-download", callback_data=f"cb:force:{track_id}:{quality}")
+        InlineKeyboardButton(text="🗑️ Delete", callback_data=f"cb:del:{ref}:{quality}"),
+        InlineKeyboardButton(text="⚡ Force Re-download", callback_data=f"cb:force:{ref}:{quality}")
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -313,20 +316,21 @@ def get_platform_route_keyboard(
 def get_channel_picker_keyboard(
     channels: List[Dict[str, Any]],
     platform: str,
-    track_id: Optional[str] = None,
-    quality: Optional[str] = None
+    track_ref: Optional[str] = None
 ) -> InlineKeyboardMarkup:
     """Channel selection menu when an unrouted media link is detected."""
     rows = []
+    clean_ref = create_track_ref(track_ref) if track_ref else ""
     for ch in channels:
         cid = ch["channel_id"]
         title = ch.get("channel_title") or f"Channel {cid}"
         star = "🌟 " if ch.get("is_primary") else ""
         btn_text = f"{star}{title[:24]}"
+        cb_data = f"cb:route_pick:{platform}:{cid}:{clean_ref}" if clean_ref else f"cb:route_pick:{platform}:{cid}"
         rows.append([
             InlineKeyboardButton(
                 text=btn_text,
-                callback_data=f"cb:route_pick:{platform}:{cid}"
+                callback_data=cb_data
             )
         ])
     rows.append([

@@ -284,10 +284,10 @@ def test_platform_detection():
         assert u == expected_url, f"For '{text}', expected URL '{expected_url}', got '{u}'"
 
     # Social video qualities
-    assert get_quality_for_platform("tiktok") == "saver"
-    assert get_quality_for_platform("instagram") == "saver"
-    assert get_quality_for_platform("twitter") == "saver"
-    assert get_quality_for_platform("reddit") == "saver"
+    assert get_quality_for_platform("tiktok") == "360p"
+    assert get_quality_for_platform("instagram") == "360p"
+    assert get_quality_for_platform("twitter") == "360p"
+    assert get_quality_for_platform("reddit") == "360p"
     assert is_social_video("tiktok") is True
     assert is_social_video("spotify") is False
 
@@ -404,6 +404,82 @@ async def test_multi_channel_and_routing():
     return True
 
 
+async def test_track_ref_tokenization():
+    """Verify track ref hashing, cache persistence, resolution, and Telegram 64-byte limit."""
+    logger.info("\n─── 7. Testing Track Ref Tokenization & 64-Byte Callback Safety ───")
+    from bot.utils.track_ref import create_track_ref, register_track_ref, resolve_track_ref
+    from bot.keyboards.inline import get_media_delivery_keyboard, get_format_picker_keyboard
+
+    # 1. Short clean YouTube ID should be preserved
+    yt_id = "dQw4w9WgXcQ"
+    assert create_track_ref(yt_id) == yt_id
+
+    # 2. Long Instagram URL with query parameters (triggers 73-byte bug without tokenization)
+    ig_url = "https://www.instagram.com/reel/Dd27f9pOURw/?stkn=YnM3MHNsOHZnaWg5"
+    ref = create_track_ref(ig_url)
+    assert len(ref) == 16, f"Expected 16-hex token, got {len(ref)} chars: '{ref}'"
+    assert ":" not in ref and "/" not in ref
+
+    # 3. Test inline keyboard callback_data length <= 64 bytes
+    post_url = "https://t.me/c/1234567890/100"
+    kb = get_media_delivery_keyboard(post_url, ig_url, quality="360p", show_extract_audio=True)
+    for row in kb.inline_keyboard:
+        for btn in row:
+            if btn.callback_data:
+                cb_len = len(btn.callback_data.encode("utf-8"))
+                assert cb_len <= 64, f"Button callback_data exceeds 64 bytes ({cb_len} bytes): '{btn.callback_data}'"
+                logger.info(f"✓ Button callback_data '{btn.callback_data}' ({cb_len} bytes) <= 64 bytes limit.")
+
+    fmt_kb = get_format_picker_keyboard(ig_url)
+    for row in fmt_kb.inline_keyboard:
+        for btn in row:
+            if btn.callback_data:
+                cb_len = len(btn.callback_data.encode("utf-8"))
+                assert cb_len <= 64, f"Format button exceeds 64 bytes ({cb_len}): '{btn.callback_data}'"
+
+    # 4. Persistence & resolution
+    registered_ref = await register_track_ref(ig_url)
+    assert registered_ref == ref
+    resolved_url = await resolve_track_ref(registered_ref)
+    assert resolved_url == ig_url, f"Expected '{ig_url}', got '{resolved_url}'"
+    logger.info(f"✓ Successfully registered token '{ref}' and resolved back to original URL.")
+
+    # 5. Idempotency on plain ID
+    assert await resolve_track_ref(yt_id) == yt_id
+
+    return True
+
+
+async def test_video_stream_validation():
+    """Verify video quality detection and ffprobe/container stream integrity checks."""
+    logger.info("\n─── 8. Testing Video Stream Validation & Quality Detection ───")
+    from bot.downloader import is_video_quality, has_video_stream
+
+    # 1. Quality detection
+    for vq in ("360p", "720p", "saver", "best", "video", "480p", "1080p"):
+        assert is_video_quality(vq) is True, f"Expected {vq} to be video quality"
+
+    for aq in ("audio", "audio_high", "high", "mp3"):
+        assert is_video_quality(aq) is False, f"Expected {aq} to NOT be video quality"
+    logger.info("✓ is_video_quality correctly identifies all video and audio presets.")
+
+    # 2. Container / ffprobe verification against sample files
+    if os.path.exists("test_video.mp4"):
+        has_v = await has_video_stream("test_video.mp4")
+        assert has_v is False, "test_video.mp4 has no video stream, but was detected as video!"
+        logger.info("✓ test_video.mp4 correctly detected as lacking video stream.")
+
+    if os.path.exists("test_360p_full.mp4"):
+        has_v = await has_video_stream("test_360p_full.mp4")
+        assert has_v is True, "test_360p_full.mp4 contains video stream, but was not detected!"
+        logger.info("✓ test_360p_full.mp4 correctly detected as having valid video stream.")
+
+    # 3. Nonexistent / empty file
+    assert await has_video_stream("nonexistent_file.mp4") is False
+
+    return True
+
+
 async def main():
     logger.info("=== Starting Sociobot Verification Suite ===\n")
     api_ok = await test_api_integration()
@@ -412,8 +488,10 @@ async def main():
     syntax_ok = test_bot_syntax()
     platform_ok = test_platform_detection()
     multi_ch_ok = await test_multi_channel_and_routing()
+    token_ok = await test_track_ref_tokenization()
+    video_val_ok = await test_video_stream_validation()
 
-    if api_ok and db_ok and pg_schema_ok and syntax_ok and platform_ok and multi_ch_ok:
+    if api_ok and db_ok and pg_schema_ok and syntax_ok and platform_ok and multi_ch_ok and token_ok and video_val_ok:
         logger.info("\n🎉 ALL SOCIOBOT VERIFICATION TESTS PASSED SUCCESSFULLY!")
         sys.exit(0)
     else:

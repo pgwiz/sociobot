@@ -21,8 +21,9 @@ from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from bot.config import settings
 from bot.database import db
-from bot.downloader import downloader
+from bot.downloader import downloader, has_video_stream, is_video_quality
 from bot.cache import cache
+from bot.utils.track_ref import create_track_ref, register_track_ref, resolve_track_ref
 from bot.utils.platform import (
     detect_platform_and_url,
     get_quality_for_platform,
@@ -70,8 +71,10 @@ async def handle_direct_url_request(message: Message, url: str):
         quality = get_quality_for_platform(platform_name)
         display_name = get_platform_display_name(platform_name)
         icon = get_platform_icon(platform_name)
+        ref = await register_track_ref(target_url)
+        await cache.set(f"pending_route_dl:{ref}", {"url": target_url, "platform": platform_name, "quality": quality}, ttl=300)
         await cache.set(f"pending_route_dl:{user_id}", {"url": target_url, "platform": platform_name, "quality": quality}, ttl=300)
-        kb = get_channel_picker_keyboard(channels, platform_name)
+        kb = get_channel_picker_keyboard(channels, platform_name, track_ref=ref)
         await message.answer(
             f"🔗 <b>Detected {icon} {display_name} Link:</b>\n"
             f"<code>{target_url}</code>\n\n"
@@ -84,7 +87,8 @@ async def handle_direct_url_request(message: Message, url: str):
 
     # If YouTube, offer format selection (Audio vs Video)
     if platform_name == "youtube":
-        kb = get_format_picker_keyboard(target_url)
+        ref = await register_track_ref(target_url)
+        kb = get_format_picker_keyboard(ref)
         await message.answer(
             f"🔗 <b>Detected Media Link:</b>\n<code>{target_url}</code>\n\n"
             f"Choose download format:",
@@ -158,8 +162,9 @@ async def cmd_video(message: Message, bot: Bot):
 async def cb_download_format(callback: CallbackQuery, bot: Bot):
     """Handle download from inline format selector: cb:dl:<track_id>:<quality>."""
     parts = callback.data.split(":")
-    track_id = parts[2]
+    raw_track_id = parts[2]
     quality = parts[3] if len(parts) > 3 else "audio_high"
+    track_id = await resolve_track_ref(raw_track_id)
 
     await callback.answer("Starting download...")
     status_msg = await callback.message.edit_text("⏳ Processing request...", parse_mode="HTML")
@@ -179,8 +184,9 @@ async def cb_download_format(callback: CallbackQuery, bot: Bot):
 async def cb_force_download(callback: CallbackQuery, bot: Bot):
     """Handle force re-download: cb:force:<track_id>:<quality>."""
     parts = callback.data.split(":")
-    track_id = parts[2]
+    raw_track_id = parts[2]
     quality = parts[3] if len(parts) > 3 else "audio_high"
+    track_id = await resolve_track_ref(raw_track_id)
 
     await callback.answer("⚡ Force re-downloading fresh media...")
     status_msg = await callback.message.answer("⚡ Bypassing cached copies and fetching fresh...", parse_mode="HTML")
@@ -207,6 +213,10 @@ async def process_media_request(
     platform: Optional[str] = None
 ):
     """Core orchestration for decentralized peer delivery and media archiving."""
+    # Ensure track_id is resolved and registered for compact button callbacks
+    track_id = await resolve_track_ref(track_id)
+    await register_track_ref(track_id)
+
     if await db.is_user_banned(user_id):
         banned_msg = "🚫 <b>Your access to Sociobot has been restricted by an administrator.</b>"
         if status_message:
@@ -220,6 +230,9 @@ async def process_media_request(
     if not platform:
         p, _ = detect_platform_and_url(track_id)
         platform = p if p else "youtube"
+
+    if is_social_video(platform) and quality == "saver":
+        quality = "360p"
 
     # 1. Verify user's destination private channel
     user_channel_id = await db.get_destination_channel(user_id, platform)
@@ -368,6 +381,15 @@ async def process_media_request(
 
     try:
         if is_video:
+            if not await has_video_stream(file_path):
+                logger.error(f"Cannot upload to user channel {user_channel_id}: {file_path} has no valid video stream!")
+                err_text = "❌ Downloaded video is corrupted or missing a video stream. Please try again."
+                if status_message:
+                    await status_message.edit_text(err_text, parse_mode="HTML")
+                else:
+                    await bot.send_message(chat_id=reply_to_chat_id, text=err_text, parse_mode="HTML")
+                return
+
             channel_msg = await bot.send_video(
                 chat_id=user_channel_id,
                 video=FSInputFile(file_path),
@@ -426,12 +448,15 @@ async def process_media_request(
 
         # Deliver to user PM with interactive action buttons
         delivery_kb = get_media_delivery_keyboard(post_url, track_id, quality, show_extract_audio=show_extract)
-        await bot.copy_message(
-            chat_id=reply_to_chat_id,
-            from_chat_id=user_channel_id,
-            message_id=channel_msg.message_id,
-            reply_markup=delivery_kb
-        )
+        try:
+            await bot.copy_message(
+                chat_id=reply_to_chat_id,
+                from_chat_id=user_channel_id,
+                message_id=channel_msg.message_id,
+                reply_markup=delivery_kb
+            )
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            logger.error(f"Cannot deliver message to user PM {reply_to_chat_id}: {e}")
 
         if status_message:
             try:
@@ -459,7 +484,8 @@ async def process_media_request(
 @router.callback_query(F.data.startswith("cb:extract_audio:"))
 async def cb_extract_audio(callback: CallbackQuery, bot: Bot):
     """Handle audio extraction request from a social video post."""
-    track_id = callback.data.split("cb:extract_audio:")[1].strip()
+    raw_track_id = callback.data.split("cb:extract_audio:")[1].strip()
+    track_id = await resolve_track_ref(raw_track_id)
     await callback.answer("🎵 Extracting audio track as MP3...")
     status_msg = await callback.message.answer("⏳ <i>Extracting audio track as MP3...</i>", parse_mode="HTML")
 
