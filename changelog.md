@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Detailed the FastAPI Lifespan architecture running Uvicorn HTTP endpoints (`/`, `/health`) and Aiogram 3 background Telegram polling concurrently with zero connection leaks.
 
 ### Changed
-- **Repository Cleanliness:**
+- **Repository Cleanliness & Privacy:**
   - Removed `agent.md` from git tracking and history, added `agent.md` to `.gitignore`.
+  - Sanitized public endpoints and personal admin credentials in `.env.example` and `readme.md`, replacing them with generic domain and placeholder values (`https://api.yourdomain.com`, `123456789`).
+
 
 ## [2.0.2] - 2026-09-30
 

@@ -123,13 +123,13 @@ Add the following in the Render **Environment** dashboard (reference `.env.examp
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather *(Required)* | `7391859147:AAEWboEBCY0lA7ZOsjRrSMwHrHq7y4-IQAY` |
-| `ADMIN_CHAT_ID` | Primary admin Telegram numeric ID | `6684660360` |
-| `SUPER_ADMIN_IDS` | Comma-separated Super Admin IDs | `6684660360` |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather *(Required)* | `123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ` |
+| `ADMIN_CHAT_ID` | Primary admin Telegram numeric ID | `123456789` |
+| `SUPER_ADMIN_IDS` | Comma-separated Super Admin IDs | `123456789` |
 | `DATABASE_URL` | Neon Serverless PostgreSQL connection string | `postgresql://user:pass@ep-xyz-pooler.tech/neondb?sslmode=require` |
 | `DB_SCHEMA` | Custom schema name for table isolation (default: `sociobot`) | `sociobot` |
 | `ENABLE_NEON_KEEPALIVE` | Ping Neon every 4 min to keep serverless compute awake | `true` |
-| `YTSP_API_BASE_URL` | Stream Extractor API base URL | `https://ytsp-api.pgwiz.cloud` |
+| `YTSP_API_BASE_URL` | Stream Extractor API base URL | `https://api.yourdomain.com` |
 | `PORT` | Dynamic port provided automatically by Render | `8080` (or `10000`) |
 
 > [!TIP]
