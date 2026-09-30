@@ -391,10 +391,15 @@ def get_user_vault_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def format_channel_link(channel_id: int, username: Optional[str] = None) -> str:
+def format_channel_link(
+    channel_id: int,
+    username: Optional[str] = None,
+    message_id: Optional[int] = None
+) -> str:
     """Format deep link to open channel in Telegram."""
     if username:
-        return f"https://t.me/{username.lstrip('@')}"
+        base = f"https://t.me/{username.lstrip('@')}"
+        return f"{base}/{message_id}" if message_id else base
     cid_str = str(channel_id)
     if cid_str.startswith("-100"):
         clean_cid = cid_str[4:]
@@ -402,7 +407,7 @@ def format_channel_link(channel_id: int, username: Optional[str] = None) -> str:
         clean_cid = cid_str[1:]
     else:
         clean_cid = cid_str
-    return f"https://t.me/c/{clean_cid}/1"
+    return f"https://t.me/c/{clean_cid}/{message_id}" if message_id else f"https://t.me/c/{clean_cid}/"
 
 
 def get_mychannels_keyboard(
@@ -446,7 +451,9 @@ def get_channel_detail_keyboard(
             InlineKeyboardButton(text="🔗 Visit Channel", url=channel_url)
         ],
         [
-            InlineKeyboardButton(text="🗑️ Unlink Channel", callback_data=f"cb:mych_unlink:{channel_id}"),
+            InlineKeyboardButton(text="🗑️ Unlink Channel", callback_data=f"cb:mych_unlink:{channel_id}")
+        ],
+        [
             InlineKeyboardButton(text="💥 Delete All Channel Media", callback_data=f"cb:mych_delmedia_1:{channel_id}")
         ],
         [
@@ -468,10 +475,8 @@ def get_channel_delmedia_confirm_keyboard(
         proceed_btn = InlineKeyboardButton(text="🔥 PURGE ALL MEDIA NOW (3/3)", callback_data=f"cb:mych_delmedia_confirm:{channel_id}")
 
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            proceed_btn,
-            InlineKeyboardButton(text="❌ Cancel", callback_data=f"cb:mych_view:{channel_id}")
-        ]
+        [proceed_btn],
+        [InlineKeyboardButton(text="❌ Cancel", callback_data=f"cb:mych_view:{channel_id}")]
     ])
 
 

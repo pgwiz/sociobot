@@ -63,7 +63,7 @@ async def cmd_help(message: Message):
         "• <code>/download &lt;link&gt; [force]</code> - Download audio\n"
         "• <code>/video &lt;link&gt; [force]</code> - Download video\n\n"
         "<b>Storage Channel Management:</b>\n"
-        "• <code>/mychannels</code> - View channels as buttons, unlink & purge media\n"
+        "• <code>/mychannels</code> (or <code>/mychanels</code>) - View channels as buttons, unlink & purge media\n"
         "• <code>/channels</code> - Platform routing matrix dashboard\n"
         "• <code>/mychannel</code> - Check primary channel\n"
         "• <code>/setchannel &lt;id&gt;</code> - Link channel manually\n"

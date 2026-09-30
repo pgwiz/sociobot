@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **/mychannels Interactive Channel Hub & 3-Step Media Purge:**
   - Added `/mychannels` and `/mychanels` (alias) commands rendering connected storage channels as interactive inline buttons.
   - Channel summary cards displaying Title, ID, Role (Primary vs Secondary), routed platforms, and total stored media item count.
-  - Channel action buttons:
-    - `[ 🔗 Visit Channel ]`: Direct URL deep-link to channel (`https://t.me/<username>` or `https://t.me/c/<clean_id>/1`).
+  - Channel action buttons in full-width mobile-safe layout:
+    - `[ 🔗 Visit Channel ]`: Direct URL deep-link to channel (`https://t.me/<username>` or `https://t.me/c/<clean_id>/`).
     - `[ 🗑️ Unlink Channel ]`: Detaches channel and automatically falls back routed platforms to primary channel.
     - `[ 💥 Delete All Channel Media ]`: Initiates strict 3-step confirmation purge.
     - `[ ⬅️ Back to Channels ]`: Instant navigation back to channel selection list.
@@ -21,9 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Step 2 (Confirmation 2/3): Permanent action irreversibility verification.
     - Step 3 (Confirmation 3/3): Final purge execution authorization.
     - Purges messages from Telegram channel (`bot.delete_message`) and database (`user_media_storage`), providing final count breakdown.
+    - Added concurrent purge mutex guards (`_purging_channels`), 50ms rate-limit pacing, `TelegramRetryAfter` exponential wait/retry, and `TelegramBadRequest` graceful handling.
+    - Added comprehensive HTML entity escaping across all channel titles and cards to prevent parsing failures.
   - **Database Helpers:**
-    - `get_channel_media_count(user_chat_id, channel_id)`: Accurate active media count per channel.
-    - `purge_channel_media(user_chat_id, channel_id)`: Deletes channel media records and returns `(channel_id, channel_msg_id)` tuples for physical Telegram message deletion.
+    - `get_channel_media_count(user_chat_id, channel_id)`: Accurate active media count per channel across PostgreSQL and SQLite.
+    - `purge_channel_media(user_chat_id, channel_id)`: Deletes channel media records and safely returns positive `(channel_id, channel_msg_id)` tuples for physical Telegram message deletion.
 
 ## [2.0.1] - 2026-09-30
 

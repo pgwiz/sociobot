@@ -8,10 +8,13 @@ Handles:
 - Dynamic channel picker on unrouted media links
 """
 
+import html
+import asyncio
 import logging
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from bot.database import db
 from bot.keyboards.inline import (
     get_channels_dashboard_keyboard,
@@ -58,10 +61,11 @@ async def render_channels_dashboard(user_id: int, bot: Bot):
     for ch in channels:
         cid = ch["channel_id"]
         title = ch.get("channel_title") or "Storage Channel"
+        safe_title = html.escape(title)
         is_primary = ch.get("is_primary", False)
         star = "🌟 <b>[Primary Vault]</b> " if is_primary else "📁 "
 
-        text_lines.append(f"{star}<b>{title}</b> (<code>{cid}</code>)")
+        text_lines.append(f"{star}<b>{safe_title}</b> (<code>{cid}</code>)")
 
         # List routed platforms for this channel
         assigned = [
@@ -171,10 +175,11 @@ async def cb_channel_route_menu(callback: CallbackQuery):
 
     routes = await db.get_all_platform_routes(user_id)
     title = target_ch.get("channel_title") or f"Channel {channel_id}"
+    safe_title = html.escape(title)
 
     text = (
         f"⚙️ <b>Route Platforms to:</b>\n"
-        f"<b>{title}</b> (<code>{channel_id}</code>)\n\n"
+        f"<b>{safe_title}</b> (<code>{channel_id}</code>)\n\n"
         f"Tap any platform to toggle its destination to this channel.\n"
         f"• ✅ = Routed to this channel\n"
         f"• ⬜ = Routed elsewhere or defaulting to primary"
@@ -350,6 +355,10 @@ async def cb_mychannels_list(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
 
+# Set of (user_id, channel_id) tuples currently undergoing media purge
+_purging_channels = set()
+
+
 @router.callback_query(F.data.startswith("cb:mych_view:"))
 async def cb_mychannel_view(callback: CallbackQuery, bot: Bot):
     """Display detailed summary and actions for a specific channel."""
@@ -368,6 +377,7 @@ async def cb_mychannel_view(callback: CallbackQuery, bot: Bot):
         return
 
     title = target_ch.get("channel_title") or f"Channel {channel_id}"
+    safe_title = html.escape(title)
     is_primary = target_ch.get("is_primary", False)
     routes = await db.get_all_platform_routes(user_id)
 
@@ -390,13 +400,13 @@ async def cb_mychannel_view(callback: CallbackQuery, bot: Bot):
     try:
         chat = await bot.get_chat(channel_id)
         if chat and chat.username:
-            channel_url = f"https://t.me/{chat.username}"
+            channel_url = format_channel_link(channel_id, username=chat.username)
     except Exception:
         pass
 
     text = (
         f"📁 <b>Channel Summary</b>\n\n"
-        f"• <b>Title:</b> {title}\n"
+        f"• <b>Title:</b> {safe_title}\n"
         f"• <b>Channel ID:</b> <code>{channel_id}</code>\n"
         f"• <b>Role:</b> {role_text}\n"
         f"• <b>Routed Platforms:</b> {routed_text}\n"
@@ -445,11 +455,11 @@ async def cb_mychannel_delmedia_step1(callback: CallbackQuery):
     channels = await db.get_user_channels(user_id)
     target_ch = next((c for c in channels if c["channel_id"] == channel_id), None)
     title = target_ch.get("channel_title") if target_ch else f"Channel {channel_id}"
+    safe_title = html.escape(title)
 
     text = (
-        f"⚠️ <b>Delete Channel Media (Confirmation 1/3)</b>\n\n"
-        f"Warning: This will delete ALL media stored in <b>{title}</b> from both your Telegram channel and your database library.\n\n"
-        f"Proceed to confirmation 2/3?"
+        f"⚠️ Warning: This will delete ALL media stored in <b>{safe_title}</b> "
+        f"from both your Telegram channel and your database library. Proceed to confirmation 2/3?"
     )
     kb = get_channel_delmedia_confirm_keyboard(channel_id=channel_id, step=1)
     try:
@@ -465,14 +475,9 @@ async def cb_mychannel_delmedia_step2(callback: CallbackQuery):
     user_id = callback.from_user.id
     channel_id = int(callback.data.split(":")[2])
 
-    channels = await db.get_user_channels(user_id)
-    target_ch = next((c for c in channels if c["channel_id"] == channel_id), None)
-    title = target_ch.get("channel_title") if target_ch else f"Channel {channel_id}"
-
     text = (
-        f"🚨 <b>Are you really sure? (Confirmation 2/3)</b>\n\n"
-        f"This action is permanent and cannot be undone. All files stored in <b>{title}</b> will be deleted from Telegram.\n\n"
-        f"Proceed to final confirmation (3/3)?"
+        "🚨 Are you really sure? This action is permanent and cannot be undone. "
+        "All files will be deleted from Telegram. (Confirmation 2/3)"
     )
     kb = get_channel_delmedia_confirm_keyboard(channel_id=channel_id, step=2)
     try:
@@ -488,14 +493,8 @@ async def cb_mychannel_delmedia_step3(callback: CallbackQuery):
     user_id = callback.from_user.id
     channel_id = int(callback.data.split(":")[2])
 
-    channels = await db.get_user_channels(user_id)
-    target_ch = next((c for c in channels if c["channel_id"] == channel_id), None)
-    title = target_ch.get("channel_title") if target_ch else f"Channel {channel_id}"
-
     text = (
-        f"🔥 <b>FINAL CONFIRMATION: Tap below to permanently purge all media in this channel. (Confirmation 3/3)</b>\n\n"
-        f"Target Channel: <b>{title}</b> (<code>{channel_id}</code>)\n\n"
-        f"⚠️ <i>All channel messages and library records will be permanently erased now.</i>"
+        "🔥 FINAL CONFIRMATION: Tap below to permanently purge all media in this channel. (Confirmation 3/3)"
     )
     kb = get_channel_delmedia_confirm_keyboard(channel_id=channel_id, step=3)
     try:
@@ -511,45 +510,85 @@ async def cb_mychannel_delmedia_purge(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
     channel_id = int(callback.data.split(":")[2])
 
-    channels = await db.get_user_channels(user_id)
-    target_ch = next((c for c in channels if c["channel_id"] == channel_id), None)
-    title = target_ch.get("channel_title") if target_ch else f"Channel {channel_id}"
+    purge_key = (user_id, channel_id)
+    if purge_key in _purging_channels:
+        await callback.answer("⏳ Purge is already in progress for this channel. Please wait.", show_alert=True)
+        return
 
+    _purging_channels.add(purge_key)
     try:
-        await callback.message.edit_text(
-            f"⏳ <b>Purging all media in {title}...</b>\nPlease wait.",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
+        channels = await db.get_user_channels(user_id)
+        target_ch = next((c for c in channels if c["channel_id"] == channel_id), None)
+        title = target_ch.get("channel_title") if target_ch else f"Channel {channel_id}"
+        safe_title = html.escape(title)
 
-    # 1. Purge records from database and get channel message IDs
-    purged_items = await db.purge_channel_media(user_id, channel_id)
-
-    # 2. Physically delete messages from Telegram channel
-    deleted_count = 0
-    for cid, mid in purged_items:
         try:
-            await bot.delete_message(chat_id=cid, message_id=mid)
-            deleted_count += 1
-        except Exception as e:
-            logger.warning(f"Could not delete message {mid} in channel {cid}: {e}")
+            await callback.message.edit_text(
+                f"⏳ <b>Purging all media in {safe_title}...</b>\nPlease wait.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
-    # 3. Update message with summary
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="⬅️ Back to Channel", callback_data=f"cb:mych_view:{channel_id}"),
-            InlineKeyboardButton(text="📁 All Channels", callback_data="cb:mych_list")
+        # 1. Purge records from database and get channel message IDs
+        purged_items = await db.purge_channel_media(user_id, channel_id)
+
+        # 2. Physically delete messages from Telegram channel
+        deleted_count = 0
+        failed_count = 0
+        for cid, mid in purged_items:
+            try:
+                await bot.delete_message(chat_id=cid, message_id=mid)
+                deleted_count += 1
+                await asyncio.sleep(0.05)
+            except TelegramRetryAfter as e:
+                logger.warning(f"Telegram flood wait {e.retry_after}s deleting msg {mid} in channel {cid}")
+                await asyncio.sleep(e.retry_after)
+                try:
+                    await bot.delete_message(chat_id=cid, message_id=mid)
+                    deleted_count += 1
+                except Exception as retry_err:
+                    logger.warning(f"Retry failed to delete msg {mid} in channel {cid}: {retry_err}")
+                    failed_count += 1
+            except TelegramBadRequest as e:
+                if "message to delete not found" in str(e).lower():
+                    deleted_count += 1
+                else:
+                    logger.warning(f"TelegramBadRequest deleting msg {mid} in channel {cid}: {e}")
+                    failed_count += 1
+            except Exception as e:
+                logger.warning(f"Could not delete message {mid} in channel {cid}: {e}")
+                failed_count += 1
+
+        # 3. Update message with summary
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⬅️ Back to Channel", callback_data=f"cb:mych_view:{channel_id}")
+            ],
+            [
+                InlineKeyboardButton(text="📁 All Channels", callback_data="cb:mych_list")
+            ]
+        ])
+
+        summary_lines = [
+            f"✅ <b>Successfully purged {len(purged_items)} tracks/videos from {safe_title}.</b>\n",
+            f"• Telegram posts deleted: <b>{deleted_count}/{len(purged_items)}</b>",
+            f"• Library records cleared: <b>{len(purged_items)}</b>"
         ]
-    ])
+        if failed_count > 0:
+            summary_lines.append(f"\n⚠️ <i>Note: {failed_count} post(s) could not be removed from Telegram. Ensure the bot is an administrator with 'Delete Messages' permission.</i>")
 
-    summary_text = (
-        f"✅ <b>Successfully purged {len(purged_items)} tracks/videos from {title}.</b>\n\n"
-        f"• Telegram posts deleted: <b>{deleted_count}/{len(purged_items)}</b>\n"
-        f"• Library records cleared: <b>{len(purged_items)}</b>"
-    )
-    try:
-        await callback.message.edit_text(summary_text, parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        pass
-    await callback.answer("Purge complete!", show_alert=False)
+        summary_text = "\n".join(summary_lines)
+        try:
+            await callback.message.edit_text(summary_text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            try:
+                await callback.message.edit_text(
+                    f"Successfully purged {len(purged_items)} tracks/videos from {title}.",
+                    reply_markup=kb
+                )
+            except Exception:
+                pass
+        await callback.answer("Purge complete!", show_alert=False)
+    finally:
+        _purging_channels.discard(purge_key)

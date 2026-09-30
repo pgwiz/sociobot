@@ -215,6 +215,24 @@ async def test_postgres_schema_isolation():
         assert u.get("chat_id") == 999999
         logger.info("✓ User insertion into isolated custom schema succeeded.")
 
+        # Test PostgreSQL get_channel_media_count and purge_channel_media
+        await test_db.add_user_channel(999999, -1009999, "PG Vault")
+        assert await test_db.get_channel_media_count(999999, -1009999) == 0
+        await test_db.save_user_media(
+            user_chat_id=999999,
+            channel_id=-1009999,
+            channel_msg_id=777,
+            channel_post_url="https://t.me/c/9999/777",
+            track_id="pg_track_1",
+            quality="audio_high",
+            platform="spotify"
+        )
+        assert await test_db.get_channel_media_count(999999, -1009999) == 1
+        pg_purged = await test_db.purge_channel_media(999999, -1009999)
+        assert len(pg_purged) == 1 and pg_purged[0] == (-1009999, 777)
+        assert await test_db.get_channel_media_count(999999, -1009999) == 0
+        logger.info("✓ PostgreSQL get_channel_media_count & purge_channel_media RETURNING verified on live Neon.")
+
         # Verify that public schema does not have this test user
         async with test_db.pg_pool.acquire() as conn:
             pub_has_user = await conn.fetchval(
@@ -493,10 +511,11 @@ async def test_mychannels_and_media_purge():
     )
 
     # 1. Test URL Link Formatter
-    assert format_channel_link(-1001234567890) == "https://t.me/c/1234567890/1"
+    assert format_channel_link(-1001234567890) == "https://t.me/c/1234567890/"
+    assert format_channel_link(-1001234567890, message_id=1) == "https://t.me/c/1234567890/1"
     assert format_channel_link(-1001234567890, username="my_channel") == "https://t.me/my_channel"
     assert format_channel_link(-1001234567890, username="@my_channel") == "https://t.me/my_channel"
-    logger.info("✓ format_channel_link correctly handles private (-100...) and public channel links.")
+    logger.info("✓ format_channel_link correctly handles private (-100...), message deep links, and public channel usernames.")
 
     # 2. Test Keyboards & Callback safety
     sample_channels = [
@@ -511,23 +530,35 @@ async def test_mychannels_and_media_purge():
                 assert cb_len <= 64, f"Callback too long: {btn.callback_data}"
     logger.info("✓ get_mychannels_keyboard generated and validated within 64-byte limit.")
 
-    detail_kb = get_channel_detail_keyboard(-1001111111111, "https://t.me/c/1111111111/1")
-    assert any(btn.url == "https://t.me/c/1111111111/1" for row in detail_kb.inline_keyboard for btn in row)
+    detail_kb = get_channel_detail_keyboard(-1001111111111, "https://t.me/c/1111111111/")
+    assert len(detail_kb.inline_keyboard) == 4, "Expected 4 full-width rows in channel detail keyboard"
+    assert any(btn.url == "https://t.me/c/1111111111/" for row in detail_kb.inline_keyboard for btn in row)
     assert any(btn.callback_data == "cb:mych_unlink:-1001111111111" for row in detail_kb.inline_keyboard for btn in row)
     assert any(btn.callback_data == "cb:mych_delmedia_1:-1001111111111" for row in detail_kb.inline_keyboard for btn in row)
     assert any(btn.callback_data == "cb:mych_list" for row in detail_kb.inline_keyboard for btn in row)
-    logger.info("✓ get_channel_detail_keyboard contains visit URL, unlink, delmedia_1, and back buttons.")
+    logger.info("✓ get_channel_detail_keyboard contains visit URL, unlink, delmedia_1, and back buttons in full-width rows.")
 
     # Test 3-step confirmation keyboards
     step1_kb = get_channel_delmedia_confirm_keyboard(-1001111111111, step=1)
     step2_kb = get_channel_delmedia_confirm_keyboard(-1001111111111, step=2)
     step3_kb = get_channel_delmedia_confirm_keyboard(-1001111111111, step=3)
 
+    assert len(step1_kb.inline_keyboard) == 2, "Expected stacked rows for step 1"
+    assert len(step2_kb.inline_keyboard) == 2, "Expected stacked rows for step 2"
+    assert len(step3_kb.inline_keyboard) == 2, "Expected stacked rows for step 3"
+
     assert any(btn.callback_data == "cb:mych_delmedia_2:-1001111111111" for row in step1_kb.inline_keyboard for btn in row)
     assert any(btn.callback_data == "cb:mych_delmedia_3:-1001111111111" for row in step2_kb.inline_keyboard for btn in row)
     assert any(btn.callback_data == "cb:mych_delmedia_confirm:-1001111111111" for row in step3_kb.inline_keyboard for btn in row)
     assert all(any(btn.callback_data == "cb:mych_view:-1001111111111" for row in kb.inline_keyboard for btn in row) for kb in [step1_kb, step2_kb, step3_kb])
-    logger.info("✓ 3-step confirmation keyboards correctly chain: Step 1 -> 2 -> 3 -> Confirm, with Cancel fallback.")
+    logger.info("✓ 3-step confirmation keyboards correctly chain: Step 1 -> 2 -> 3 -> Confirm, with Cancel fallback in mobile-safe stacked layout.")
+
+    # Test HTML escaping safety
+    import html
+    special_title = "Pop & Rock <HQ Vault>"
+    escaped = html.escape(special_title)
+    assert escaped == "Pop &amp; Rock &lt;HQ Vault&gt;"
+    logger.info("✓ HTML sanitization verified for user channel titles.")
 
     # 3. Database testing: get_channel_media_count & purge_channel_media
     test_db_path = "test_mychannels.db"

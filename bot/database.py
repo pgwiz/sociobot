@@ -1339,7 +1339,11 @@ class Database:
                     """,
                     user_chat_id, channel_id
                 )
-                return [(int(r["channel_id"]), int(r["channel_msg_id"])) for r in rows]
+                return [
+                    (int(r["channel_id"]), int(r["channel_msg_id"]))
+                    for r in rows
+                    if r["channel_msg_id"] is not None and int(r["channel_msg_id"]) > 0
+                ]
             return await self._execute_pg_with_retry(_run)
         else:
             cur = await self.sqlite_conn.execute(
@@ -1347,7 +1351,11 @@ class Database:
                 (user_chat_id, channel_id)
             )
             rows = await cur.fetchall()
-            result = [(int(r[0]), int(r[1])) for r in rows]
+            result = [
+                (int(r[0]), int(r[1]))
+                for r in rows
+                if r[1] is not None and int(r[1]) > 0
+            ]
             await self.sqlite_conn.execute(
                 "DELETE FROM user_media_storage WHERE user_chat_id = ? AND channel_id = ?;",
                 (user_chat_id, channel_id)
