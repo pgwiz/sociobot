@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-10-17
+
+### Added
+- **MongoDB Atlas Integration:**
+  - Added native asynchronous MongoDB Atlas driver support (`motor` and `pymongo`) in `bot/database.py`.
+  - Multi-tenant database isolation hierarchy: URI path -> `MONGO_DB_NAME` -> `DB_SCHEMA` -> bot ID (`bot_<id>`) -> `sociobot`.
+  - Full CRUD support for all collections: `users`, `user_channels`, `user_platform_routes`, `user_media_storage`, `tracks`, `api_cache`, `download_history`, and `rate_limits`.
+  - Automatic index creation on database connection.
+- **PostgreSQL to MongoDB Atlas Migration Utility (`migrate_pg_to_mongo.py`):**
+  - Standalone, idempotent migration script that copies all tables and records from Neon PostgreSQL schema to MongoDB Atlas with bulk upserts.
+  - Verified row-by-row count matching across all 8 tables.
+- **MongoDB Integration Test Suite (`test_mongo_integration.py`):**
+  - Comprehensive automated tests covering URI resolution, multi-channel vaults, platform routing, media caching, rate limiting, and 3-step media purge.
+
+### Changed
+- **Database Configuration & Environment:**
+  - Updated `bot/config.py` with `MONGO_URL` and `MONGO_DB_NAME` parameters and automatic fallback.
+  - Updated `.env.example` and `readme.md` with MongoDB Atlas connection examples.
+
 ## [2.0.3] - 2026-09-30
 
 ### Added

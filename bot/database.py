@@ -1,20 +1,32 @@
-"""Database Manager with Dual Support: Neon PostgreSQL & SQLite Fallback.
+"""Database Manager with Triple Support: MongoDB Atlas, Neon PostgreSQL & SQLite Fallback.
 
 Decentralized Multi-Node Media Storage Architecture:
 - Tracks individual user private storage channels.
 - Records media posted across user channels with direct deep-links.
 - Facilitates peer-to-peer media replication across channels.
 - Handles node failure, soft/hard deletion, and channel unlinking.
+- Dynamic multi-tenant database naming per bot token ID, custom URI, or schema.
 """
 
 import asyncio
 import json
 import logging
 import os
+import re
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
+
 import aiosqlite
 import asyncpg
+
+try:
+    import motor.motor_asyncio
+    import pymongo
+    HAS_MOTOR = True
+except ImportError:
+    HAS_MOTOR = False
+
 from bot.config import settings
 
 logger = logging.getLogger(__name__)
@@ -36,6 +48,9 @@ class Database:
     def __init__(self):
         self.pg_pool: Optional[asyncpg.Pool] = None
         self.sqlite_conn: Optional[aiosqlite.Connection] = None
+        self.mongo_client: Optional[Any] = None
+        self.mongo_db: Optional[Any] = None
+        self._active_db_name: Optional[str] = None
         self._keepalive_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._is_shutting_down = False
@@ -47,24 +62,113 @@ class Database:
         return s or "sociobot"
 
     @property
+    def is_mongo(self) -> bool:
+        """Return True if DATABASE_URL or MONGO_URL specifies MongoDB."""
+        db_url = settings.DATABASE_URL or getattr(settings, "MONGO_URL", "") or ""
+        return db_url.startswith("mongodb://") or db_url.startswith("mongodb+srv://")
+
+    @property
     def is_postgres(self) -> bool:
         """Return True if DATABASE_URL specifies PostgreSQL / Neon."""
+        if self.is_mongo:
+            return False
         db_url = settings.DATABASE_URL or ""
         return db_url.startswith("postgresql://") or db_url.startswith("postgres://")
 
     @property
     def is_connected(self) -> bool:
-        return self.pg_pool is not None or self.sqlite_conn is not None
+        return self.mongo_client is not None or self.pg_pool is not None or self.sqlite_conn is not None
+
+    @staticmethod
+    def resolve_mongo_db_name(
+        uri: str = "",
+        configured_db_name: Optional[str] = None,
+        bot_token: Optional[str] = None,
+        default_schema: Optional[str] = None
+    ) -> str:
+        """Resolve MongoDB database name.
+        
+        Resolution priority:
+        1. Database name explicitly in URI path (e.g. mongodb+srv://.../dbname?retryWrites=true)
+        2. Configured MONGO_DB_NAME env / setting
+        3. Configured DB_SCHEMA (if set and not 'public')
+        4. Bot token ID (e.g. bot_7391859147)
+        5. Fallback default: 'sociobot'
+        """
+        if uri:
+            try:
+                parsed = urllib.parse.urlparse(uri)
+                path_part = parsed.path.lstrip("/").strip()
+                if path_part and not path_part.startswith("?"):
+                    name = path_part.split("/")[0].split("?")[0].strip()
+                    if name:
+                        return name
+            except Exception as e:
+                logger.warning(f"Failed parsing MongoDB URI path: {e}")
+
+        if configured_db_name and str(configured_db_name).strip():
+            return str(configured_db_name).strip()
+
+        if default_schema and str(default_schema).strip() and str(default_schema).strip() != "public":
+            return str(default_schema).strip()
+
+        if bot_token and ":" in bot_token:
+            bot_id = bot_token.split(":")[0].strip()
+            if bot_id and bot_id.isdigit():
+                return f"bot_{bot_id}"
+
+        return "sociobot"
 
     async def connect(self) -> None:
-        """Connect to either Neon PostgreSQL or SQLite based on configuration."""
+        """Connect to MongoDB Atlas, Neon PostgreSQL, or SQLite based on configuration."""
         async with self._lock:
             if self.is_connected:
                 return
 
-            db_url = settings.DATABASE_URL or ""
+            db_url = settings.DATABASE_URL or getattr(settings, "MONGO_URL", "") or ""
 
-            if self.is_postgres:
+            # ── 1. Connect to MongoDB Atlas ──
+            if self.is_mongo:
+                if not HAS_MOTOR:
+                    raise ImportError("MongoDB driver not installed. Run 'pip install motor pymongo dnspython'.")
+
+                bot_tok = settings.TELEGRAM_BOT_TOKEN
+                db_name = self.resolve_mongo_db_name(
+                    uri=db_url,
+                    configured_db_name=getattr(settings, "MONGO_DB_NAME", None),
+                    bot_token=bot_tok,
+                    default_schema=self.schema
+                )
+                self._active_db_name = db_name
+
+                logger.info(f"Connecting to MongoDB cluster (target database: '{db_name}')...")
+                max_retries = 3
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+                            db_url,
+                            serverSelectionTimeoutMS=10000,
+                            connectTimeoutMS=10000,
+                            socketTimeoutMS=30000,
+                            maxPoolSize=getattr(settings, "DB_POOL_MAX_SIZE", 10),
+                            minPoolSize=getattr(settings, "DB_POOL_MIN_SIZE", 2)
+                        )
+                        # Verify connectivity
+                        await self.mongo_client.admin.command("ping")
+                        self.mongo_db = self.mongo_client[db_name]
+                        logger.info(f"MongoDB connected successfully to database: '{db_name}'.")
+                        await self._migrate()
+                        return
+                    except Exception as e:
+                        logger.warning(f"MongoDB connection attempt {attempt} failed: {e}")
+                        if attempt < max_retries:
+                            await asyncio.sleep(2.0)
+                        else:
+                            logger.error(f"Failed to connect to MongoDB after {max_retries} attempts.")
+                            raise
+
+            # ── 2. Connect to Neon PostgreSQL ──
+            elif self.is_postgres:
                 max_retries = 5
                 base_delay = 1.5
                 schema = self.schema
@@ -74,11 +178,13 @@ class Database:
                 async def _setup_connection(conn):
                     await conn.execute(f'SET search_path TO "{schema}", public;')
 
+                clean_pg_url = db_url.replace("&channel_binding=require", "")
+
                 for attempt in range(1, max_retries + 1):
                     try:
                         logger.info(f"Connecting to Neon PostgreSQL (schema: '{schema}', attempt {attempt}/{max_retries})...")
                         self.pg_pool = await asyncpg.create_pool(
-                            dsn=db_url,
+                            dsn=clean_pg_url,
                             min_size=settings.DB_POOL_MIN_SIZE,
                             max_size=settings.DB_POOL_MAX_SIZE,
                             timeout=25.0,
@@ -113,6 +219,8 @@ class Database:
                         else:
                             logger.error("Failed to connect to Neon PostgreSQL after retries.")
                             raise
+
+            # ── 3. Connect to SQLite (Fallback) ──
             else:
                 db_path = settings.DATABASE_PATH or "sociobot.db"
                 if db_url.startswith("sqlite:///"):
@@ -143,9 +251,14 @@ class Database:
                 pass
             self._keepalive_task = None
 
+        if self.mongo_client:
+            self.mongo_client.close()
+            self.mongo_client = None
+            self.mongo_db = None
+            logger.info("MongoDB client connection closed.")
+
         if self.pg_pool:
             try:
-                # Fast graceful pool closure (up to 3.0s, then terminate)
                 await asyncio.wait_for(self.pg_pool.close(), timeout=3.0)
             except (asyncio.TimeoutError, Exception):
                 self.pg_pool.terminate()
@@ -202,8 +315,42 @@ class Database:
                     raise
 
     async def _migrate(self) -> None:
-        """Run schema migrations for PostgreSQL or SQLite."""
-        if self.is_postgres:
+        """Run schema migrations for MongoDB, PostgreSQL, or SQLite."""
+        # ── MongoDB Indexes ──
+        if self.is_mongo:
+            logger.info(f"Ensuring MongoDB indexes on database '{self.mongo_db.name}'...")
+            await self.mongo_db.users.create_index("chat_id", unique=True)
+            await self.mongo_db.users.create_index("username")
+
+            await self.mongo_db.user_channels.create_index([("user_chat_id", 1), ("channel_id", 1)], unique=True)
+            await self.mongo_db.user_channels.create_index("user_chat_id")
+
+            await self.mongo_db.user_platform_routes.create_index([("user_chat_id", 1), ("platform", 1)], unique=True)
+            await self.mongo_db.user_platform_routes.create_index("user_chat_id")
+
+            await self.mongo_db.user_media_storage.create_index(
+                [("user_chat_id", 1), ("track_id", 1), ("quality", 1)], unique=True
+            )
+            await self.mongo_db.user_media_storage.create_index(
+                [("track_id", 1), ("quality", 1), ("is_available", 1)]
+            )
+            await self.mongo_db.user_media_storage.create_index("user_chat_id")
+            await self.mongo_db.user_media_storage.create_index("channel_id")
+
+            await self.mongo_db.tracks.create_index([("track_id", 1), ("quality", 1)], unique=True)
+            await self.mongo_db.tracks.create_index("track_id")
+
+            await self.mongo_db.api_cache.create_index("cache_key", unique=True)
+            await self.mongo_db.api_cache.create_index("expires_at")
+
+            await self.mongo_db.download_history.create_index("user_chat_id")
+            await self.mongo_db.download_history.create_index([("user_chat_id", 1), ("created_at", -1)])
+
+            await self.mongo_db.rate_limits.create_index([("user_chat_id", 1), ("action", 1)], unique=True)
+            logger.info(f"MongoDB indexes verified successfully on '{self.mongo_db.name}'.")
+
+        # ── PostgreSQL Migrations ──
+        elif self.is_postgres:
             schema = self.schema
 
             async def _run(conn):
@@ -220,6 +367,7 @@ class Database:
                         terms_accepted BOOLEAN DEFAULT FALSE,
                         is_admin BOOLEAN DEFAULT FALSE,
                         is_banned BOOLEAN DEFAULT FALSE,
+                        max_channels INT DEFAULT 5,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                     );
@@ -318,6 +466,8 @@ class Database:
                 """)
             await self._execute_pg_with_retry(_run)
             logger.info(f"Neon PostgreSQL schema migrations applied successfully to schema '{schema}'.")
+
+        # ── SQLite Migrations ──
         else:
             await self.sqlite_conn.executescript("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -416,34 +566,16 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_history_user ON download_history(user_chat_id);
                 CREATE INDEX IF NOT EXISTS idx_user_channels_user ON user_channels(user_chat_id);
                 CREATE INDEX IF NOT EXISTS idx_platform_routes_user ON user_platform_routes(user_chat_id);
+
+                INSERT OR IGNORE INTO user_channels (user_chat_id, channel_id, channel_title, is_primary, is_active)
+                SELECT chat_id, channel_id, COALESCE(channel_title, 'My Storage Channel'), 1, 1
+                FROM users
+                WHERE channel_id IS NOT NULL;
             """)
             await self.sqlite_conn.commit()
-
-            for alter_sql in (
-                "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0;",
-                "ALTER TABLE users ADD COLUMN max_channels INTEGER DEFAULT 5;",
-                "ALTER TABLE user_media_storage ADD COLUMN platform TEXT DEFAULT 'youtube';",
-                "ALTER TABLE user_media_storage ADD COLUMN destination_channel_id INTEGER;"
-            ):
-                try:
-                    await self.sqlite_conn.execute(alter_sql)
-                    await self.sqlite_conn.commit()
-                except Exception:
-                    pass
-
-            try:
-                await self.sqlite_conn.execute("""
-                    INSERT OR IGNORE INTO user_channels (user_chat_id, channel_id, channel_title, is_primary, is_active)
-                    SELECT chat_id, channel_id, coalesce(channel_title, 'My Storage Channel'), 1, 1
-                    FROM users
-                    WHERE channel_id IS NOT NULL;
-                """)
-                await self.sqlite_conn.commit()
-            except Exception:
-                pass
             logger.info("SQLite schema migrations applied successfully.")
 
-    # ── User & Channel Management ─────────────────────────────────────────
+    # ── User Onboarding & Channel Configuration ───────────────────────────
 
     async def get_or_create_user(
         self,
@@ -456,7 +588,46 @@ class Database:
         if not self.is_connected:
             return {"chat_id": chat_id, "username": username, "first_name": first_name, "is_admin": is_admin, "is_banned": False, "max_channels": 5}
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            set_doc = {
+                "username": username,
+                "first_name": first_name,
+                "last_active": now
+            }
+            if is_admin:
+                set_doc["is_admin"] = True
+
+            res = await self.mongo_db.users.find_one_and_update(
+                {"chat_id": chat_id},
+                {
+                    "$set": set_doc,
+                    "$setOnInsert": {
+                        "chat_id": chat_id,
+                        "channel_id": None,
+                        "channel_title": None,
+                        "is_storage_active": True,
+                        "terms_accepted": False,
+                        "is_admin": is_admin,
+                        "is_banned": False,
+                        "max_channels": 5,
+                        "created_at": now
+                    }
+                },
+                upsert=True,
+                return_document=pymongo.ReturnDocument.AFTER
+            )
+            if res:
+                d = dict(res)
+                d.pop("_id", None)
+                d["is_storage_active"] = bool(d.get("is_storage_active", True))
+                d["terms_accepted"] = bool(d.get("terms_accepted", False))
+                d["is_admin"] = bool(d.get("is_admin", False))
+                d["is_banned"] = bool(d.get("is_banned", False))
+                d["max_channels"] = int(d.get("max_channels") or 5)
+                return d
+            return {}
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     """
@@ -511,7 +682,12 @@ class Database:
         except Exception as e:
             logger.warning(f"Error in link_user_channel adding to user_channels: {e}")
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.users.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"channel_id": channel_id, "channel_title": channel_title, "is_storage_active": True}}
+            )
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     """
@@ -538,7 +714,16 @@ class Database:
         if not self.is_connected:
             return
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.users.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"is_storage_active": False}}
+            )
+            await self.mongo_db.user_channels.update_many(
+                {"user_chat_id": chat_id},
+                {"$set": {"is_active": False}}
+            )
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     """
@@ -567,7 +752,12 @@ class Database:
         if not self.is_connected:
             return
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.users.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"terms_accepted": accepted}}
+            )
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     "UPDATE users SET terms_accepted = $1 WHERE chat_id = $2;",
@@ -591,7 +781,10 @@ class Database:
         if channels:
             primary = next((c for c in channels if c.get("is_primary")), channels[0])
             user_terms = False
-            if self.is_postgres:
+            if self.is_mongo:
+                u = await self.mongo_db.users.find_one({"chat_id": chat_id}, {"terms_accepted": 1})
+                user_terms = bool(u.get("terms_accepted")) if u else False
+            elif self.is_postgres:
                 async def _get_terms(conn):
                     return await conn.fetchval("SELECT terms_accepted FROM users WHERE chat_id = $1;", chat_id)
                 user_terms = bool(await self._execute_pg_with_retry(_get_terms) or False)
@@ -609,7 +802,19 @@ class Database:
             }
 
         # 2. Fallback to legacy users table
-        if self.is_postgres:
+        if self.is_mongo:
+            row = await self.mongo_db.users.find_one(
+                {"chat_id": chat_id},
+                {"channel_id": 1, "channel_title": 1, "is_storage_active": 1, "terms_accepted": 1}
+            )
+            if row:
+                d = dict(row)
+                d.pop("_id", None)
+                d["is_storage_active"] = bool(d.get("is_storage_active", False))
+                d["terms_accepted"] = bool(d.get("terms_accepted", False))
+                return d
+            return None
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     "SELECT channel_id, channel_title, is_storage_active, terms_accepted FROM users WHERE chat_id = $1;",
@@ -638,7 +843,10 @@ class Database:
             return getattr(settings, "DEFAULT_MAX_CHANNELS", 5)
 
         default_max = getattr(settings, "DEFAULT_MAX_CHANNELS", 5)
-        if self.is_postgres:
+        if self.is_mongo:
+            u = await self.mongo_db.users.find_one({"chat_id": user_chat_id}, {"max_channels": 1})
+            return int(u["max_channels"]) if (u and u.get("max_channels") is not None) else default_max
+        elif self.is_postgres:
             async def _run(conn):
                 val = await conn.fetchval("SELECT max_channels FROM users WHERE chat_id = $1;", user_chat_id)
                 return int(val) if val is not None else default_max
@@ -653,7 +861,10 @@ class Database:
         if not self.is_connected:
             return False
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.users.update_one({"chat_id": user_chat_id}, {"$set": {"max_channels": max_channels}})
+            return True
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute("UPDATE users SET max_channels = $1 WHERE chat_id = $2;", max_channels, user_chat_id)
                 return True
@@ -668,7 +879,9 @@ class Database:
         if not self.is_connected:
             return 0
 
-        if self.is_postgres:
+        if self.is_mongo:
+            return await self.mongo_db.user_channels.count_documents({"user_chat_id": user_chat_id, "is_active": True})
+        elif self.is_postgres:
             async def _run(conn):
                 val = await conn.fetchval(
                     "SELECT COUNT(*) FROM user_channels WHERE user_chat_id = $1 AND is_active = TRUE;",
@@ -689,7 +902,21 @@ class Database:
         if not self.is_connected:
             return []
 
-        if self.is_postgres:
+        if self.is_mongo:
+            cursor = self.mongo_db.user_channels.find(
+                {"user_chat_id": user_chat_id, "is_active": True}
+            ).sort([("is_primary", -1), ("_id", 1)])
+            docs = await cursor.to_list(length=100)
+            res = []
+            for idx, d in enumerate(docs, 1):
+                item = dict(d)
+                item["id"] = idx
+                item.pop("_id", None)
+                item["is_primary"] = bool(item.get("is_primary", False))
+                item["is_active"] = bool(item.get("is_active", True))
+                res.append(item)
+            return res
+        elif self.is_postgres:
             async def _run(conn):
                 rows = await conn.fetch(
                     """
@@ -747,7 +974,42 @@ class Database:
         if not existing_channels:
             set_primary = True
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            if set_primary:
+                await self.mongo_db.user_channels.update_many(
+                    {"user_chat_id": user_chat_id},
+                    {"$set": {"is_primary": False}}
+                )
+            await self.mongo_db.user_channels.update_one(
+                {"user_chat_id": user_chat_id, "channel_id": channel_id},
+                {
+                    "$set": {
+                        "channel_title": channel_title,
+                        "is_primary": set_primary,
+                        "is_active": True
+                    },
+                    "$setOnInsert": {
+                        "user_chat_id": user_chat_id,
+                        "channel_id": channel_id,
+                        "created_at": now
+                    }
+                },
+                upsert=True
+            )
+            if set_primary:
+                await self.mongo_db.users.update_one(
+                    {"chat_id": user_chat_id},
+                    {"$set": {"channel_id": channel_id, "channel_title": channel_title, "is_storage_active": True}}
+                )
+            return {
+                "user_chat_id": user_chat_id,
+                "channel_id": channel_id,
+                "channel_title": channel_title,
+                "is_primary": set_primary,
+                "is_active": True
+            }
+        elif self.is_postgres:
             async def _run(conn):
                 if set_primary:
                     await conn.execute(
@@ -809,7 +1071,24 @@ class Database:
         if not self.is_connected:
             return False
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.user_channels.update_many(
+                {"user_chat_id": user_chat_id},
+                {"$set": {"is_primary": False}}
+            )
+            res = await self.mongo_db.user_channels.find_one_and_update(
+                {"user_chat_id": user_chat_id, "channel_id": channel_id, "is_active": True},
+                {"$set": {"is_primary": True}},
+                return_document=pymongo.ReturnDocument.AFTER
+            )
+            if res:
+                title = res.get("channel_title")
+                await self.mongo_db.users.update_one(
+                    {"chat_id": user_chat_id},
+                    {"$set": {"channel_id": channel_id, "channel_title": title, "is_storage_active": True}}
+                )
+            return True
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     """
@@ -862,7 +1141,50 @@ class Database:
         if not self.is_connected:
             return {"success": False, "re_routed": 0, "new_primary_id": None}
 
-        if self.is_postgres:
+        if self.is_mongo:
+            ch = await self.mongo_db.user_channels.find_one({"user_chat_id": user_chat_id, "channel_id": channel_id})
+            was_primary = bool(ch.get("is_primary")) if ch else False
+            await self.mongo_db.user_channels.delete_one({"user_chat_id": user_chat_id, "channel_id": channel_id})
+
+            cursor = self.mongo_db.user_channels.find(
+                {"user_chat_id": user_chat_id, "is_active": True}
+            ).sort([("is_primary", -1), ("_id", 1)])
+            remaining = await cursor.to_list(length=100)
+
+            new_primary_id = None
+            if remaining:
+                if was_primary:
+                    new_primary_id = remaining[0]["channel_id"]
+                    await self.mongo_db.user_channels.update_one(
+                        {"user_chat_id": user_chat_id, "channel_id": new_primary_id},
+                        {"$set": {"is_primary": True}}
+                    )
+                    await self.mongo_db.users.update_one(
+                        {"chat_id": user_chat_id},
+                        {"$set": {"channel_id": new_primary_id, "channel_title": remaining[0]["channel_title"], "is_storage_active": True}}
+                    )
+                else:
+                    prim = next((c for c in remaining if c.get("is_primary")), remaining[0])
+                    new_primary_id = prim["channel_id"]
+            else:
+                await self.mongo_db.users.update_one(
+                    {"chat_id": user_chat_id},
+                    {"$set": {"channel_id": None, "channel_title": None, "is_storage_active": False}}
+                )
+
+            re_routed = 0
+            if new_primary_id:
+                up_res = await self.mongo_db.user_platform_routes.update_many(
+                    {"user_chat_id": user_chat_id, "channel_id": channel_id},
+                    {"$set": {"channel_id": new_primary_id}}
+                )
+                re_routed = up_res.modified_count
+            else:
+                await self.mongo_db.user_platform_routes.delete_many({"user_chat_id": user_chat_id})
+
+            return {"success": True, "re_routed": re_routed, "new_primary_id": new_primary_id}
+
+        elif self.is_postgres:
             async def _run(conn):
                 # 1. Delete from user_channels
                 was_primary = await conn.fetchval(
@@ -978,7 +1300,18 @@ class Database:
         if not self.is_connected:
             return False
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            await self.mongo_db.user_platform_routes.update_one(
+                {"user_chat_id": user_chat_id, "platform": platform},
+                {
+                    "$set": {"channel_id": channel_id, "updated_at": now},
+                    "$setOnInsert": {"user_chat_id": user_chat_id, "platform": platform}
+                },
+                upsert=True
+            )
+            return True
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     """
@@ -1011,7 +1344,10 @@ class Database:
         if not self.is_connected:
             return False
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.user_platform_routes.delete_one({"user_chat_id": user_chat_id, "platform": platform})
+            return True
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute("DELETE FROM user_platform_routes WHERE user_chat_id = $1 AND platform = $2;", user_chat_id, platform)
                 return True
@@ -1026,7 +1362,10 @@ class Database:
         if not self.is_connected:
             return None
 
-        if self.is_postgres:
+        if self.is_mongo:
+            doc = await self.mongo_db.user_platform_routes.find_one({"user_chat_id": user_chat_id, "platform": platform})
+            return int(doc["channel_id"]) if doc else None
+        elif self.is_postgres:
             async def _run(conn):
                 val = await conn.fetchval(
                     "SELECT channel_id FROM user_platform_routes WHERE user_chat_id = $1 AND platform = $2;",
@@ -1047,7 +1386,11 @@ class Database:
         if not self.is_connected:
             return {}
 
-        if self.is_postgres:
+        if self.is_mongo:
+            cursor = self.mongo_db.user_platform_routes.find({"user_chat_id": user_chat_id})
+            docs = await cursor.to_list(length=100)
+            return {d["platform"]: int(d["channel_id"]) for d in docs}
+        elif self.is_postgres:
             async def _run(conn):
                 rows = await conn.fetch(
                     "SELECT platform, channel_id FROM user_platform_routes WHERE user_chat_id = $1;",
@@ -1098,7 +1441,32 @@ class Database:
         if not self.is_connected:
             return None
 
-        if self.is_postgres:
+        if self.is_mongo:
+            doc = await self.mongo_db.user_media_storage.find_one(
+                {"user_chat_id": user_chat_id, "track_id": track_id, "quality": quality, "is_available": True}
+            )
+            if not doc:
+                return None
+            res = {
+                "channel_id": doc["channel_id"],
+                "channel_msg_id": doc["channel_msg_id"],
+                "channel_post_url": doc.get("channel_post_url", ""),
+                "telegram_file_id": doc.get("telegram_file_id"),
+                "title": None,
+                "artist": None,
+                "duration_secs": 0,
+                "file_size_bytes": 0,
+                "thumbnail_url": None
+            }
+            track_meta = await self.mongo_db.tracks.find_one({"track_id": track_id, "quality": quality})
+            if track_meta:
+                res["title"] = track_meta.get("title")
+                res["artist"] = track_meta.get("artist")
+                res["duration_secs"] = track_meta.get("duration_secs", 0)
+                res["file_size_bytes"] = track_meta.get("file_size_bytes", 0)
+                res["thumbnail_url"] = track_meta.get("thumbnail_url")
+            return res
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     """
@@ -1133,7 +1501,31 @@ class Database:
         if not self.is_connected:
             return []
 
-        if self.is_postgres:
+        if self.is_mongo:
+            cursor = self.mongo_db.user_media_storage.find(
+                {"track_id": track_id, "quality": quality, "is_available": True}
+            ).sort("created_at", 1).limit(5)
+            docs = await cursor.to_list(length=5)
+            if not docs:
+                return []
+            track_meta = await self.mongo_db.tracks.find_one({"track_id": track_id, "quality": quality})
+            results = []
+            for doc in docs:
+                item = {
+                    "channel_id": doc["channel_id"],
+                    "channel_msg_id": doc["channel_msg_id"],
+                    "channel_post_url": doc.get("channel_post_url", ""),
+                    "user_chat_id": doc["user_chat_id"],
+                    "telegram_file_id": doc.get("telegram_file_id"),
+                    "title": track_meta.get("title") if track_meta else None,
+                    "artist": track_meta.get("artist") if track_meta else None,
+                    "duration_secs": track_meta.get("duration_secs", 0) if track_meta else 0,
+                    "file_size_bytes": track_meta.get("file_size_bytes", 0) if track_meta else 0,
+                    "thumbnail_url": track_meta.get("thumbnail_url") if track_meta else None,
+                }
+                results.append(item)
+            return results
+        elif self.is_postgres:
             async def _run(conn):
                 rows = await conn.fetch(
                     """
@@ -1183,7 +1575,30 @@ class Database:
 
         dest_id = destination_channel_id or channel_id
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            await self.mongo_db.user_media_storage.update_one(
+                {"user_chat_id": user_chat_id, "track_id": track_id, "quality": quality},
+                {
+                    "$set": {
+                        "channel_id": channel_id,
+                        "channel_msg_id": channel_msg_id,
+                        "channel_post_url": channel_post_url,
+                        "telegram_file_id": telegram_file_id,
+                        "platform": platform,
+                        "destination_channel_id": dest_id,
+                        "is_available": True,
+                        "created_at": now
+                    },
+                    "$setOnInsert": {
+                        "user_chat_id": user_chat_id,
+                        "track_id": track_id,
+                        "quality": quality
+                    }
+                },
+                upsert=True
+            )
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     """
@@ -1232,7 +1647,12 @@ class Database:
         if not self.is_connected:
             return
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.user_media_storage.update_many(
+                {"channel_id": channel_id, "channel_msg_id": channel_msg_id},
+                {"$set": {"is_available": False}}
+            )
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     "UPDATE user_media_storage SET is_available = FALSE WHERE channel_id = $1 AND channel_msg_id = $2;",
@@ -1251,7 +1671,23 @@ class Database:
         if not self.is_connected:
             return []
 
-        if self.is_postgres:
+        if self.is_mongo:
+            flt = {"user_chat_id": user_chat_id, "track_id": track_id}
+            if quality:
+                flt["quality"] = quality
+            cursor = self.mongo_db.user_media_storage.find(flt, {"channel_id": 1, "channel_msg_id": 1, "track_id": 1, "quality": 1})
+            docs = await cursor.to_list(length=100)
+            await self.mongo_db.user_media_storage.delete_many(flt)
+            return [
+                {
+                    "channel_id": d["channel_id"],
+                    "channel_msg_id": d["channel_msg_id"],
+                    "track_id": d["track_id"],
+                    "quality": d["quality"]
+                }
+                for d in docs
+            ]
+        elif self.is_postgres:
             async def _run(conn):
                 if quality:
                     rows = await conn.fetch(
@@ -1305,7 +1741,11 @@ class Database:
         if not self.is_connected:
             return 0
 
-        if self.is_postgres:
+        if self.is_mongo:
+            return await self.mongo_db.user_media_storage.count_documents(
+                {"user_chat_id": user_chat_id, "channel_id": channel_id, "is_available": True}
+            )
+        elif self.is_postgres:
             async def _run(conn):
                 val = await conn.fetchval(
                     "SELECT COUNT(*) FROM user_media_storage WHERE user_chat_id = $1 AND channel_id = $2 AND is_available = TRUE;",
@@ -1329,7 +1769,17 @@ class Database:
         if not self.is_connected:
             return []
 
-        if self.is_postgres:
+        if self.is_mongo:
+            flt = {"user_chat_id": user_chat_id, "channel_id": channel_id}
+            cursor = self.mongo_db.user_media_storage.find(flt, {"channel_id": 1, "channel_msg_id": 1})
+            docs = await cursor.to_list(length=10000)
+            await self.mongo_db.user_media_storage.delete_many(flt)
+            return [
+                (int(d["channel_id"]), int(d["channel_msg_id"]))
+                for d in docs
+                if d.get("channel_msg_id") is not None and int(d["channel_msg_id"]) > 0
+            ]
+        elif self.is_postgres:
             async def _run(conn):
                 rows = await conn.fetch(
                     """
@@ -1380,7 +1830,28 @@ class Database:
         if not self.is_connected:
             return
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            await self.mongo_db.tracks.update_one(
+                {"track_id": track_id, "quality": quality},
+                {
+                    "$set": {
+                        "title": title,
+                        "artist": artist,
+                        "duration_secs": duration_secs,
+                        "file_size_bytes": file_size_bytes,
+                        "thumbnail_url": thumbnail_url,
+                        "source": source
+                    },
+                    "$setOnInsert": {
+                        "track_id": track_id,
+                        "quality": quality,
+                        "created_at": now
+                    }
+                },
+                upsert=True
+            )
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     """
@@ -1421,7 +1892,10 @@ class Database:
         if not self.is_connected:
             return None
 
-        if self.is_postgres:
+        if self.is_mongo:
+            doc = await self.mongo_db.tracks.find_one({"track_id": track_id, "quality": quality}, {"_id": 0})
+            return dict(doc) if doc else None
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     "SELECT track_id, quality, title, artist, duration_secs, file_size_bytes, thumbnail_url, source FROM tracks WHERE track_id = $1 AND quality = $2;",
@@ -1444,7 +1918,19 @@ class Database:
         if not self.is_connected:
             return None
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            doc = await self.mongo_db.api_cache.find_one({"cache_key": cache_key, "expires_at": {"$gt": now}})
+            if doc:
+                val = doc.get("response_json")
+                if isinstance(val, str):
+                    try:
+                        return json.loads(val)
+                    except Exception:
+                        return val
+                return val
+            return None
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     "SELECT response_json FROM api_cache WHERE cache_key = $1 AND expires_at > NOW();",
@@ -1474,9 +1960,25 @@ class Database:
             return
 
         expires_at_dt = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
-        data_json = json.dumps(data)
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            await self.mongo_db.api_cache.update_one(
+                {"cache_key": cache_key},
+                {
+                    "$set": {
+                        "response_json": data,
+                        "expires_at": expires_at_dt
+                    },
+                    "$setOnInsert": {
+                        "cache_key": cache_key,
+                        "created_at": now
+                    }
+                },
+                upsert=True
+            )
+        elif self.is_postgres:
+            data_json = json.dumps(data)
             async def _run(conn):
                 await conn.execute(
                     """
@@ -1490,6 +1992,7 @@ class Database:
                 )
             await self._execute_pg_with_retry(_run)
         else:
+            data_json = json.dumps(data)
             expires_at_str = expires_at_dt.strftime("%Y-%m-%d %H:%M:%S")
             await self.sqlite_conn.execute(
                 """
@@ -1508,7 +2011,9 @@ class Database:
         if not self.is_connected:
             return
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.api_cache.delete_one({"cache_key": cache_key})
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute("DELETE FROM api_cache WHERE cache_key = $1;", cache_key)
             await self._execute_pg_with_retry(_run)
@@ -1531,7 +2036,18 @@ class Database:
         if not self.is_connected:
             return
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            await self.mongo_db.download_history.insert_one({
+                "user_chat_id": user_chat_id,
+                "track_id": track_id,
+                "title": title,
+                "quality": quality,
+                "channel_msg_id": channel_msg_id,
+                "channel_post_url": channel_post_url,
+                "created_at": now
+            })
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     """
@@ -1556,7 +2072,14 @@ class Database:
         if not self.is_connected:
             return []
 
-        if self.is_postgres:
+        if self.is_mongo:
+            cursor = self.mongo_db.download_history.find(
+                {"user_chat_id": user_chat_id},
+                {"_id": 0, "track_id": 1, "title": 1, "quality": 1, "channel_msg_id": 1, "channel_post_url": 1, "created_at": 1}
+            ).sort("created_at", -1).limit(limit)
+            docs = await cursor.to_list(length=limit)
+            return [dict(d) for d in docs]
+        elif self.is_postgres:
             async def _run(conn):
                 rows = await conn.fetch(
                     """
@@ -1592,7 +2115,43 @@ class Database:
         now_dt = datetime.now(timezone.utc)
         window_start_dt = now_dt - timedelta(seconds=window_secs)
 
-        if self.is_postgres:
+        if self.is_mongo:
+            row = await self.mongo_db.rate_limits.find_one({"user_chat_id": user_chat_id, "action": action})
+            if not row:
+                await self.mongo_db.rate_limits.update_one(
+                    {"user_chat_id": user_chat_id, "action": action},
+                    {"$set": {"attempt_count": 1, "window_start": now_dt}},
+                    upsert=True
+                )
+                return True
+
+            w_start = row.get("window_start")
+            if isinstance(w_start, str):
+                try:
+                    w_start = datetime.fromisoformat(w_start)
+                except Exception:
+                    w_start = window_start_dt - timedelta(seconds=1)
+            if w_start.tzinfo is None:
+                w_start = w_start.replace(tzinfo=timezone.utc)
+
+            if w_start < window_start_dt:
+                await self.mongo_db.rate_limits.update_one(
+                    {"user_chat_id": user_chat_id, "action": action},
+                    {"$set": {"attempt_count": 1, "window_start": now_dt}},
+                    upsert=True
+                )
+                return True
+
+            if row.get("attempt_count", 1) >= max_requests:
+                return False
+
+            await self.mongo_db.rate_limits.update_one(
+                {"user_chat_id": user_chat_id, "action": action},
+                {"$inc": {"attempt_count": 1}}
+            )
+            return True
+
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     "SELECT attempt_count, window_start FROM rate_limits WHERE user_chat_id = $1 AND action = $2;",
@@ -1649,10 +2208,12 @@ class Database:
             return True
 
     async def get_current_schema(self) -> Optional[str]:
-        """Return the active PostgreSQL schema or 'main' for SQLite."""
+        """Return the active PostgreSQL schema, MongoDB db name, or 'main' for SQLite."""
         if not self.is_connected:
             return None
-        if self.is_postgres:
+        if self.is_mongo:
+            return self._active_db_name or (self.mongo_db.name if self.mongo_db else "mongodb")
+        elif self.is_postgres:
             async def _run(conn):
                 return await conn.fetchval("SELECT current_schema();")
             return await self._execute_pg_with_retry(_run)
@@ -1667,7 +2228,19 @@ class Database:
         if not self.is_connected:
             return {"users": 0, "channels": 0, "media_nodes": 0, "unique_tracks": 0, "schema": "disconnected"}
 
-        if self.is_postgres:
+        if self.is_mongo:
+            total_users = await self.mongo_db.users.count_documents({})
+            channels = await self.mongo_db.user_channels.distinct("channel_id", {"is_active": True})
+            media_nodes = await self.mongo_db.user_media_storage.count_documents({"is_available": True})
+            unique_tracks = await self.mongo_db.tracks.count_documents({})
+            return {
+                "users": total_users,
+                "channels": len(channels),
+                "media_nodes": media_nodes,
+                "unique_tracks": unique_tracks,
+                "schema": self._active_db_name or self.mongo_db.name
+            }
+        elif self.is_postgres:
             schema = self.schema
             async def _run(conn):
                 total_users = await conn.fetchval("SELECT COUNT(*) FROM users;")
@@ -1701,7 +2274,11 @@ class Database:
         if not self.is_connected:
             return 0
 
-        if self.is_postgres:
+        if self.is_mongo:
+            now = datetime.now(timezone.utc)
+            res = await self.mongo_db.api_cache.delete_many({"expires_at": {"$lt": now}})
+            return res.deleted_count
+        elif self.is_postgres:
             async def _run(conn):
                 res = await conn.execute("DELETE FROM api_cache WHERE expires_at < NOW();")
                 return int(res.split(" ")[-1]) if " " in res else 0
@@ -1718,7 +2295,10 @@ class Database:
         if not self.is_connected:
             return False
 
-        if self.is_postgres:
+        if self.is_mongo:
+            u = await self.mongo_db.users.find_one({"chat_id": chat_id}, {"is_banned": 1})
+            return bool(u.get("is_banned")) if u else False
+        elif self.is_postgres:
             async def _run(conn):
                 val = await conn.fetchval("SELECT is_banned FROM users WHERE chat_id = $1;", chat_id)
                 return bool(val) if val is not None else False
@@ -1742,7 +2322,40 @@ class Database:
         search_pattern = f"%{search.strip()}%" if search and search.strip() else None
         exact_id = search.strip() if search and search.strip().isdigit() else None
 
-        if self.is_postgres:
+        if self.is_mongo:
+            flt: Dict[str, Any] = {}
+            if search and search.strip():
+                clean = search.strip()
+                if clean.isdigit():
+                    flt = {"$or": [
+                        {"chat_id": int(clean)},
+                        {"username": {"$regex": re.escape(clean), "$options": "i"}},
+                        {"first_name": {"$regex": re.escape(clean), "$options": "i"}}
+                    ]}
+                else:
+                    flt = {"$or": [
+                        {"username": {"$regex": re.escape(clean), "$options": "i"}},
+                        {"first_name": {"$regex": re.escape(clean), "$options": "i"}}
+                    ]}
+            total = await self.mongo_db.users.count_documents(flt)
+            cursor = self.mongo_db.users.find(flt).sort("last_active", -1).skip(offset).limit(page_size)
+            user_docs = await cursor.to_list(length=page_size)
+            results = []
+            for u in user_docs:
+                d = dict(u)
+                d.pop("_id", None)
+                d["is_storage_active"] = bool(d.get("is_storage_active", True))
+                d["is_admin"] = bool(d.get("is_admin", False))
+                d["is_banned"] = bool(d.get("is_banned", False))
+                d["max_channels"] = int(d.get("max_channels") or 5)
+                v_cnt = await self.mongo_db.user_media_storage.count_documents(
+                    {"user_chat_id": d["chat_id"], "is_available": True}
+                )
+                d["vault_count"] = v_cnt
+                results.append(d)
+            return results, total
+
+        elif self.is_postgres:
             async def _run(conn):
                 if search_pattern:
                     total = await conn.fetchval(
@@ -1837,6 +2450,7 @@ class Database:
                 d["is_storage_active"] = bool(d.get("is_storage_active", 0))
                 d["is_admin"] = bool(d.get("is_admin", 0))
                 d["is_banned"] = bool(d.get("is_banned", 0))
+                d["max_channels"] = int(d.get("max_channels") or 5)
                 user_list.append(d)
             return user_list, total
 
@@ -1846,7 +2460,24 @@ class Database:
             return None
 
         user_dict = None
-        if self.is_postgres:
+        if self.is_mongo:
+            u = await self.mongo_db.users.find_one({"chat_id": chat_id})
+            if u:
+                d = dict(u)
+                d.pop("_id", None)
+                d["is_storage_active"] = bool(d.get("is_storage_active", False))
+                d["terms_accepted"] = bool(d.get("terms_accepted", False))
+                d["is_admin"] = bool(d.get("is_admin", False))
+                d["is_banned"] = bool(d.get("is_banned", False))
+                d["max_channels"] = int(d.get("max_channels") or 5)
+                d["vault_count"] = await self.mongo_db.user_media_storage.count_documents(
+                    {"user_chat_id": chat_id, "is_available": True}
+                )
+                d["download_count"] = await self.mongo_db.download_history.count_documents(
+                    {"user_chat_id": chat_id}
+                )
+                user_dict = d
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     """
@@ -1900,7 +2531,31 @@ class Database:
 
         offset = max(0, (page - 1) * page_size)
 
-        if self.is_postgres:
+        if self.is_mongo:
+            flt = {"user_chat_id": user_chat_id, "is_available": True}
+            total = await self.mongo_db.user_media_storage.count_documents(flt)
+            cursor = self.mongo_db.user_media_storage.find(flt).sort("created_at", -1).skip(offset).limit(page_size)
+            docs = await cursor.to_list(length=page_size)
+            results = []
+            for idx, s in enumerate(docs, 1):
+                t_meta = await self.mongo_db.tracks.find_one({"track_id": s["track_id"], "quality": s["quality"]})
+                item = {
+                    "id": idx + offset,
+                    "track_id": s["track_id"],
+                    "quality": s["quality"],
+                    "channel_msg_id": s["channel_msg_id"],
+                    "channel_post_url": s.get("channel_post_url", ""),
+                    "telegram_file_id": s.get("telegram_file_id"),
+                    "created_at": s.get("created_at"),
+                    "title": t_meta.get("title") if t_meta else None,
+                    "artist": t_meta.get("artist") if t_meta else None,
+                    "duration_secs": t_meta.get("duration_secs", 0) if t_meta else 0,
+                    "thumbnail_url": t_meta.get("thumbnail_url") if t_meta else None,
+                }
+                results.append(item)
+            return results, total
+
+        elif self.is_postgres:
             async def _run(conn):
                 total = await conn.fetchval(
                     "SELECT COUNT(*) FROM user_media_storage WHERE user_chat_id = $1 AND is_available = TRUE;",
@@ -1948,7 +2603,12 @@ class Database:
         if not self.is_connected:
             return False
 
-        if self.is_postgres:
+        if self.is_mongo:
+            u = await self.mongo_db.users.find_one({"chat_id": chat_id}, {"is_admin": 1})
+            new_val = not bool(u.get("is_admin")) if u else True
+            await self.mongo_db.users.update_one({"chat_id": chat_id}, {"$set": {"is_admin": new_val}})
+            return new_val
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     "UPDATE users SET is_admin = NOT is_admin WHERE chat_id = $1 RETURNING is_admin;",
@@ -1969,7 +2629,12 @@ class Database:
         if not self.is_connected:
             return False
 
-        if self.is_postgres:
+        if self.is_mongo:
+            u = await self.mongo_db.users.find_one({"chat_id": chat_id}, {"is_banned": 1})
+            new_val = not bool(u.get("is_banned")) if u else True
+            await self.mongo_db.users.update_one({"chat_id": chat_id}, {"$set": {"is_banned": new_val}})
+            return new_val
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     "UPDATE users SET is_banned = NOT is_banned WHERE chat_id = $1 RETURNING is_banned;",
@@ -1994,7 +2659,18 @@ class Database:
             await self.remove_user_channel(chat_id, channel_id)
             return
 
-        if self.is_postgres:
+        if self.is_mongo:
+            await self.mongo_db.users.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"channel_id": None, "channel_title": None, "is_storage_active": False}}
+            )
+            await self.mongo_db.user_channels.delete_many({"user_chat_id": chat_id})
+            await self.mongo_db.user_platform_routes.delete_many({"user_chat_id": chat_id})
+            await self.mongo_db.user_media_storage.update_many(
+                {"user_chat_id": chat_id},
+                {"$set": {"is_available": False}}
+            )
+        elif self.is_postgres:
             async def _run(conn):
                 await conn.execute(
                     "UPDATE users SET channel_id = NULL, channel_title = NULL, is_storage_active = FALSE WHERE chat_id = $1;",
@@ -2032,7 +2708,13 @@ class Database:
 
         clean_user = clean.lstrip("@")
 
-        if self.is_postgres:
+        if self.is_mongo:
+            doc = await self.mongo_db.users.find_one(
+                {"username": {"$regex": f"^{re.escape(clean_user)}$", "$options": "i"}},
+                {"chat_id": 1}
+            )
+            return await self.get_user_details(doc["chat_id"]) if doc else None
+        elif self.is_postgres:
             async def _run(conn):
                 row = await conn.fetchrow(
                     "SELECT chat_id FROM users WHERE username ILIKE $1 LIMIT 1;",
@@ -2052,4 +2734,3 @@ class Database:
 
 # Singleton instance
 db = Database()
-

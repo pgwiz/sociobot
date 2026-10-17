@@ -126,15 +126,22 @@ Add the following in the Render **Environment** dashboard (reference `.env.examp
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather *(Required)* | `123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ` |
 | `ADMIN_CHAT_ID` | Primary admin Telegram numeric ID | `123456789` |
 | `SUPER_ADMIN_IDS` | Comma-separated Super Admin IDs | `123456789` |
-| `DATABASE_URL` | Neon Serverless PostgreSQL connection string | `postgresql://user:pass@ep-xyz-pooler.tech/neondb?sslmode=require` |
-| `DB_SCHEMA` | Custom schema name for table isolation (default: `sociobot`) | `sociobot` |
-| `ENABLE_NEON_KEEPALIVE` | Ping Neon every 4 min to keep serverless compute awake | `true` |
+| `DATABASE_URL` | MongoDB Atlas URI *(Recommended)* or Neon PostgreSQL | `mongodb+srv://user:pass@cluster.mongodb.net/sociobot?retryWrites=true&w=majority` |
+| `MONGO_URL` | MongoDB Atlas URI (alias if DATABASE_URL is unset) | `mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true&w=majority` |
+| `MONGO_DB_NAME` | Optional MongoDB database name override (defaults to `sociobot` or `bot_<id>`) | `sociobot` |
+| `DB_SCHEMA` | Custom schema name for PostgreSQL / fallback isolation | `sociobot` |
 | `YTSP_API_BASE_URL` | Stream Extractor API base URL | `https://api.yourdomain.com` |
 | `PORT` | Dynamic port provided automatically by Render | `8080` (or `10000`) |
 
 > [!TIP]
-> **Why Neon PostgreSQL is recommended for Render:**
-> Render container disks are ephemeral on free instances. Using a remote PostgreSQL database (like Neon) ensures user channel registrations, media mapping links, and download history persist across deploys and container restarts.
+> **Persistent Cloud Storage (MongoDB Atlas or Neon PostgreSQL):**
+> Render container disks are ephemeral on free instances. Using a cloud database (MongoDB Atlas or Neon Serverless PostgreSQL) ensures user channel registrations, media mapping links, and download history persist across deploys and container restarts.
+> 
+> **Migrating from Neon PostgreSQL to MongoDB Atlas:**
+> Run the idempotent migration utility to transfer all existing tables, channels, media nodes, and caches:
+> ```bash
+> python migrate_pg_to_mongo.py
+> ```
 
 ---
 

@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +22,42 @@ class Settings(BaseSettings):
     ADMIN_CHAT_ID: int = Field(0, description="Telegram User ID of Admin")
     SUPER_ADMIN_IDS: str = Field("", description="Comma-separated Telegram user IDs of Super Admins")
 
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_config(cls, values: dict):
+        if isinstance(values, dict):
+            # Sanitize and strip token
+            tok = values.get("TELEGRAM_BOT_TOKEN")
+            if tok and isinstance(tok, str):
+                values["TELEGRAM_BOT_TOKEN"] = tok.strip().strip('"\'')
+            # Fallback to MONGO_URL if DATABASE_URL is not set or defaults to sqlite and MONGO_URL is provided
+            db_url = values.get("DATABASE_URL")
+            mongo_url = values.get("MONGO_URL")
+            if mongo_url and isinstance(mongo_url, str):
+                values["MONGO_URL"] = mongo_url.strip().strip('"\'')
+                if not db_url or db_url == "sqlite:///sociobot.db" or not str(db_url).strip():
+                    values["DATABASE_URL"] = values["MONGO_URL"]
+            if values.get("DATABASE_URL") and isinstance(values.get("DATABASE_URL"), str):
+                values["DATABASE_URL"] = values["DATABASE_URL"].strip().strip('"\'')
+            if values.get("MONGO_DB_NAME") and isinstance(values.get("MONGO_DB_NAME"), str):
+                values["MONGO_DB_NAME"] = values["MONGO_DB_NAME"].strip().strip('"\'')
+            if values.get("DB_SCHEMA") and isinstance(values.get("DB_SCHEMA"), str):
+                values["DB_SCHEMA"] = values["DB_SCHEMA"].strip().strip('"\'')
+        return values
+
     # Stream Extractor API
     YTSP_API_BASE_URL: str = Field("https://ytsp-api.pgwiz.cloud", description="Stream Extractor API base URL")
     YTSP_API_TIMEOUT: int = Field(30, description="API HTTP timeout in seconds")
     ENABLE_API_FALLBACK: bool = Field(True, description="Fallback to local yt-dlp if API fails")
 
-    # Database (Neon PostgreSQL or SQLite)
-    DATABASE_URL: Optional[str] = Field("sqlite:///sociobot.db", description="Database connection URI")
+    # Database (MongoDB Atlas, Neon PostgreSQL, or SQLite)
+    DATABASE_URL: Optional[str] = Field("sqlite:///sociobot.db", description="Database connection URI (MongoDB, PostgreSQL, or SQLite)")
+    MONGO_URL: Optional[str] = Field(None, description="MongoDB connection URI alias")
+    MONGO_DB_NAME: Optional[str] = Field(None, description="MongoDB database name override")
     DATABASE_PATH: Optional[str] = Field("sociobot.db", description="SQLite path if used")
     DB_SCHEMA: str = Field("sociobot", description="PostgreSQL custom schema name for table isolation")
-    DB_POOL_MIN_SIZE: int = Field(2, description="Min asyncpg pool connections")
-    DB_POOL_MAX_SIZE: int = Field(10, description="Max asyncpg pool connections")
+    DB_POOL_MIN_SIZE: int = Field(2, description="Min database pool connections")
+    DB_POOL_MAX_SIZE: int = Field(10, description="Max database pool connections")
     ENABLE_NEON_KEEPALIVE: bool = Field(False, description="Enable Neon ping loop")
     DEFAULT_MAX_CHANNELS: int = Field(5, description="Default channel quota per user")
 

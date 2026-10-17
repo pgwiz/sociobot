@@ -18,18 +18,25 @@
      - `/stream/play`: Audio proxy stream.
      - `/download`: Pre-packaged ID3-tagged MP3 audio packages.
 
-2. **Neon Serverless PostgreSQL & Schema Isolation:**
-   - URI: Configured via `DATABASE_URL`.
-   - Custom Schema Isolation: Configured via `DB_SCHEMA` (defaults to `sociobot`). Allows `sociobot` to share the same Neon PostgreSQL instance as other bots (like `telegram-ultra-mini` using `public`) without table collisions or data leakage.
-   - Driver: `asyncpg` with connection pooling.
-   - Scale-to-Zero & Cold-Start Handling:
-     - PgBouncer compatibility: `statement_cache_size=0` on `create_pool` to avoid prepared statement conflicts on Neon `-pooler` endpoints.
-     - Pool Checkout Setup Hook: `asyncpg.create_pool(..., setup=_setup_connection)` executes `SET search_path TO "<schema>", public;` on every connection checkout, ensuring session state persists across PgBouncer transaction-mode connection recycling and `RESET ALL`.
-     - Cold-start wakeup backoff: 5 retries with exponential backoff (1.5s, 3s, 6s, 12s, 24s).
-     - Query-level retry: `_execute_pg_with_retry` automatically catches `ConnectionResetError`, `CannotConnectNowError`, or `ConnectionDoesNotExistError`, re-establishes the pool, and re-executes.
-     - Keep-alive ping loop: Background task executes `SELECT 1;` every 240 seconds when `ENABLE_NEON_KEEPALIVE=true`.
-     - Graceful Shutdown Latch: `self._is_shutting_down` latch prevents keepalive pings or closing queries from touching a closing pool; pool disconnect is bounded with a 3.0s timeout falling back to `terminate()`.
-   - SQLite Fallback: Activated when `DATABASE_URL` is unconfigured or starts with `sqlite:///`, using `aiosqlite` with WAL mode.
+2. **Database Layer (MongoDB Atlas, Neon Serverless PostgreSQL & SQLite):**
+   - **MongoDB Atlas (Primary & Recommended):**
+     - URI: Configured via `DATABASE_URL` (starts with `mongodb://` or `mongodb+srv://`) or `MONGO_URL`.
+     - Driver: `motor.motor_asyncio` and `pymongo` with non-blocking async operations.
+     - Multi-tenant Database Isolation Hierarchy:
+       1. Database name in URI path (`...mongodb.net/dbname?retryWrites=true`)
+       2. Explicit setting `MONGO_DB_NAME`
+       3. Schema name `DB_SCHEMA` (if set and not 'public')
+       4. Bot numeric ID extracted from token (`bot_<id>`, e.g. `bot_7391859147`)
+       5. Fallback default: `sociobot`
+     - Automatic Index Management: Indexes for `users`, `user_channels`, `user_platform_routes`, `user_media_storage`, `tracks`, `api_cache`, `download_history`, and `rate_limits` are created automatically upon connection.
+   - **Neon Serverless PostgreSQL:**
+     - URI: Configured via `DATABASE_URL` (`postgresql://...`).
+     - Custom Schema Isolation: Configured via `DB_SCHEMA` (defaults to `sociobot`).
+     - Driver: `asyncpg` with connection pooling, statement_cache_size=0, and automatic keepalive.
+   - **SQLite Fallback:**
+     - Activated when `DATABASE_URL` starts with `sqlite:///`, using `aiosqlite` with WAL mode.
+   - **PostgreSQL to MongoDB Migration Script:**
+     - `migrate_pg_to_mongo.py`: Idempotent bulk upsert script that migrates all 8 tables and records from Neon PostgreSQL schema `sociobot` to MongoDB Atlas cluster (`sociobot` or `bot_7391859147`).
 
 3. **Render Deployment & Lifespan Architecture:**
    - Primary CLI Startup: `python -m bot.main` (or `uvicorn bot.main:app --host 0.0.0.0 --port $PORT`).
