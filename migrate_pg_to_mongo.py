@@ -32,6 +32,12 @@ import asyncpg
 import motor.motor_asyncio
 from pymongo import UpdateOne
 
+try:
+    import certifi
+    HAS_CERTIFI = True
+except ImportError:
+    HAS_CERTIFI = False
+
 # Add project root to sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -122,10 +128,16 @@ async def migrate(
     logger.info("Connected to Neon PostgreSQL.")
 
     # 2. Connect to MongoDB
+    mongo_kwargs: Dict[str, Any] = {
+        "serverSelectionTimeoutMS": 15000,
+        "connectTimeoutMS": 15000,
+    }
+    if HAS_CERTIFI:
+        mongo_kwargs["tlsCAFile"] = certifi.where()
+
     mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
         mongo_url,
-        serverSelectionTimeoutMS=15000,
-        connectTimeoutMS=15000
+        **mongo_kwargs
     )
     await mongo_client.admin.command("ping")
     mongo_db = mongo_client[target_db_name]

@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Database Configuration & Environment:**
-  - Updated `bot/config.py` with `MONGO_URL` and `MONGO_DB_NAME` parameters and automatic fallback.
-  - Updated `.env.example` and `readme.md` with MongoDB Atlas connection examples.
+  - Integrated `certifi` trusted Mozilla CA bundle (`tlsCAFile=certifi.where()`) in Motor client initialization for cross-platform cloud container compatibility (Render, Docker).
+  - Added `MONGO_TLS_INSECURE` configuration flag and detailed SSL handshake failure hints.
+  - Updated `bot/config.py` with `MONGO_URL`, `MONGO_DB_NAME`, and `MONGO_TLS_INSECURE` parameters with automatic fallback.
+  - Updated `.env.example` and `readme.md` with MongoDB Atlas connection examples and Render IP Access List guidelines.
 
 ## [2.0.3] - 2026-09-30
 

@@ -27,6 +27,12 @@ try:
 except ImportError:
     HAS_MOTOR = False
 
+try:
+    import certifi
+    HAS_CERTIFI = True
+except ImportError:
+    HAS_CERTIFI = False
+
 from bot.config import settings
 
 logger = logging.getLogger(__name__)
@@ -145,13 +151,22 @@ class Database:
                 max_retries = 3
                 for attempt in range(1, max_retries + 1):
                     try:
+                        client_kwargs: Dict[str, Any] = {
+                            "serverSelectionTimeoutMS": 10000,
+                            "connectTimeoutMS": 10000,
+                            "socketTimeoutMS": 30000,
+                            "maxPoolSize": getattr(settings, "DB_POOL_MAX_SIZE", 10),
+                            "minPoolSize": getattr(settings, "DB_POOL_MIN_SIZE", 2),
+                        }
+                        if HAS_CERTIFI:
+                            client_kwargs["tlsCAFile"] = certifi.where()
+
+                        if getattr(settings, "MONGO_TLS_INSECURE", False) or "tlsallowinvalidcertificates=true" in db_url.lower():
+                            client_kwargs["tlsAllowInvalidCertificates"] = True
+
                         self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
                             db_url,
-                            serverSelectionTimeoutMS=10000,
-                            connectTimeoutMS=10000,
-                            socketTimeoutMS=30000,
-                            maxPoolSize=getattr(settings, "DB_POOL_MAX_SIZE", 10),
-                            minPoolSize=getattr(settings, "DB_POOL_MIN_SIZE", 2)
+                            **client_kwargs
                         )
                         # Verify connectivity
                         await self.mongo_client.admin.command("ping")
@@ -160,7 +175,14 @@ class Database:
                         await self._migrate()
                         return
                     except Exception as e:
-                        logger.warning(f"MongoDB connection attempt {attempt} failed: {e}")
+                        err_msg = str(e)
+                        logger.warning(f"MongoDB connection attempt {attempt} failed: {err_msg}")
+                        if "tlsv1 alert internal error" in err_msg.lower() or "ssl handshake failed" in err_msg.lower():
+                            logger.error(
+                                "MongoDB SSL/TLS Alert: This almost always means MongoDB Atlas Network Access (IP Access List) "
+                                "is blocking this server's dynamic IP address. If deploying on Render, Heroku, or cloud containers, "
+                                "add '0.0.0.0/0' (Allow access from anywhere) in MongoDB Atlas Dashboard -> Security -> Network Access."
+                            )
                         if attempt < max_retries:
                             await asyncio.sleep(2.0)
                         else:

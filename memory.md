@@ -22,6 +22,8 @@
    - **MongoDB Atlas (Primary & Recommended):**
      - URI: Configured via `DATABASE_URL` (starts with `mongodb://` or `mongodb+srv://`) or `MONGO_URL`.
      - Driver: `motor.motor_asyncio` and `pymongo` with non-blocking async operations.
+     - TLS / SSL Security: Configured with `tlsCAFile=certifi.where()` for verified Mozilla CA root certificates across cloud environments. Optional `MONGO_TLS_INSECURE` setting for proxy diagnostics.
+     - Cloud Hosting IP Access (Render): Requires `0.0.0.0/0` (Allow access from anywhere) in Atlas Network Access because cloud hosts use rotating dynamic egress IPs. (Note: `0.0.0.0/24` only covers IPs up to 0.0.0.255 and will reject cloud instances).
      - Multi-tenant Database Isolation Hierarchy:
        1. Database name in URI path (`...mongodb.net/dbname?retryWrites=true`)
        2. Explicit setting `MONGO_DB_NAME`

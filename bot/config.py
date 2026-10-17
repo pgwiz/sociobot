@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = Field("sqlite:///sociobot.db", description="Database connection URI (MongoDB, PostgreSQL, or SQLite)")
     MONGO_URL: Optional[str] = Field(None, description="MongoDB connection URI alias")
     MONGO_DB_NAME: Optional[str] = Field(None, description="MongoDB database name override")
+    MONGO_TLS_INSECURE: bool = Field(False, description="Allow invalid TLS certificates for MongoDB (for troubleshooting/proxies)")
     DATABASE_PATH: Optional[str] = Field("sociobot.db", description="SQLite path if used")
     DB_SCHEMA: str = Field("sociobot", description="PostgreSQL custom schema name for table isolation")
     DB_POOL_MIN_SIZE: int = Field(2, description="Min database pool connections")
