@@ -12,6 +12,7 @@ from typing import Optional, Tuple, Dict, Any
 from pathlib import Path
 import httpx
 import shutil
+import time
 from bot.config import settings
 from bot.api_client import api_client
 
@@ -152,25 +153,37 @@ class Downloader:
                         logger.info(f"Downloading pre-packaged MP3 from API: {full_dl_url}")
                         timeout = httpx.Timeout(connect=15.0, read=90.0, write=30.0, pool=30.0)
                         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as dl_client:
-                            resp = await dl_client.get(full_dl_url)
-                            if resp.status_code == 200 and len(resp.content) > 1000:
-                                if resp.content[:3] == b"ID3" or resp.content[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+                            async with dl_client.stream("GET", full_dl_url) as resp:
+                                if resp.status_code in (200, 206):
+                                    first_chunk = b""
                                     with open(file_path, "wb") as f:
-                                        f.write(resp.content)
-                                    raw_title = first_file.get("name", "Audio Track").replace(".mp3", "")
-                                    parts = raw_title.split(" - ", 1)
-                                    artist = parts[0].strip() if len(parts) > 1 else "Unknown Artist"
-                                    title = parts[1].strip() if len(parts) > 1 else raw_title
-                                    metadata = {
-                                        "title": title,
-                                        "artist": artist,
-                                        "duration": 0,
-                                        "videoId": identifier,
-                                        "source": "api_download",
-                                        "is_video": False,
-                                        "quality": quality
-                                    }
-                                    return file_path, None, metadata
+                                        async for chunk in resp.aiter_bytes(chunk_size=65536):
+                                            if not first_chunk:
+                                                first_chunk = chunk
+                                            f.write(chunk)
+
+                                    if len(first_chunk) >= 3 and (first_chunk[:3] == b"ID3" or first_chunk[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")):
+                                        raw_title = first_file.get("name", "Audio Track").replace(".mp3", "")
+                                        parts = raw_title.split(" - ", 1)
+                                        artist = parts[0].strip() if len(parts) > 1 else "Unknown Artist"
+                                        title = parts[1].strip() if len(parts) > 1 else raw_title
+                                        metadata = {
+                                            "title": title,
+                                            "artist": artist,
+                                            "duration": 0,
+                                            "videoId": identifier,
+                                            "source": "api_download",
+                                            "is_video": False,
+                                            "quality": quality
+                                        }
+                                        return file_path, None, metadata
+                                    else:
+                                        # Invalid or incomplete audio stream
+                                        if os.path.exists(file_path):
+                                            try:
+                                                os.remove(file_path)
+                                            except Exception:
+                                                pass
             except Exception as dl_err:
                 logger.warning(f"Pre-packaged /download attempt skipped/failed: {dl_err}")
 
@@ -429,6 +442,7 @@ class Downloader:
             "is_video": is_video,
             "quality": quality
         }
+        del info  # Release large yt-dlp extracted metadata dictionary from RAM
 
         return file_path, thumb_path, metadata
 
@@ -443,6 +457,34 @@ class Downloader:
                     os.remove(p)
                 except Exception as e:
                     logger.debug(f"Could not remove temp file {p}: {e}")
+
+    def cleanup_task_artifacts(self, task_id: str) -> None:
+        """Clean up all temporary files and fragments matching a task_id prefix."""
+        if not settings.AUTO_CLEANUP_TEMP or not task_id or not self.download_dir.exists():
+            return
+        for f in self.download_dir.glob(f"{task_id}*"):
+            try:
+                if f.is_file():
+                    f.unlink(missing_ok=True)
+            except Exception as e:
+                logger.debug(f"Could not remove artifact {f}: {e}")
+
+    def cleanup_orphaned_files(self, max_age_seconds: int = 1800) -> int:
+        """Remove temporary download files and fragments older than max_age_seconds."""
+        if not self.download_dir.exists():
+            return 0
+        now = time.time()
+        removed_count = 0
+        for f in self.download_dir.iterdir():
+            try:
+                if f.is_file():
+                    stat = f.stat()
+                    if now - stat.st_mtime > max_age_seconds:
+                        f.unlink(missing_ok=True)
+                        removed_count += 1
+            except Exception as e:
+                logger.debug(f"Could not purge orphaned file {f}: {e}")
+        return removed_count
 
 
 downloader = Downloader()

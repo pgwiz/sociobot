@@ -477,8 +477,15 @@ async def process_media_request(
             await bot.send_message(chat_id=reply_to_chat_id, text=err_msg, parse_mode="HTML")
 
     finally:
-        # Cleanup temp local files
+        # Cleanup temp local files and all task artifacts
         downloader.cleanup_files(file_path, thumb_path)
+        if file_path:
+            try:
+                base_name = os.path.basename(file_path).split(".")[0]
+                if base_name and len(base_name) == 8:
+                    downloader.cleanup_task_artifacts(base_name)
+            except Exception:
+                pass
 
 
 @router.callback_query(F.data.startswith("cb:extract_audio:"))

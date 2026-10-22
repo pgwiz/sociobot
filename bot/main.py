@@ -8,6 +8,7 @@ import asyncio
 import logging
 import sys
 import os
+import gc
 from contextlib import asynccontextmanager
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -17,6 +18,8 @@ from fastapi import FastAPI
 from bot.config import settings
 from bot.database import db
 from bot.api_client import api_client
+from bot.downloader import downloader
+from bot.cache import cache
 from bot.handlers import register_all_handlers
 
 # Configure structured logging
@@ -68,7 +71,34 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not register Telegram commands: {e}")
 
-    # 4. Launch polling as background task inside event loop
+    # 4. Periodic Housekeeping & Memory Optimization Task
+    async def _housekeeping_loop():
+        """Periodic background task running every 30m to prevent RAM and disk bloat."""
+        while True:
+            try:
+                await asyncio.sleep(1800)  # Every 30 minutes
+                # 1. Clean orphaned temporary download files (>30m old)
+                cleaned_files = downloader.cleanup_orphaned_files(max_age_seconds=1800)
+                # 2. Evict expired entries from RAM cache
+                evicted_ram = cache.expire_ram()
+                # 3. Purge expired database cache rows
+                cleaned_db = await db.cleanup_expired_cache()
+                # 4. Trigger cyclic garbage collection to release unreferenced memory to OS
+                collected = gc.collect()
+                if cleaned_files > 0 or cleaned_db > 0 or evicted_ram > 0:
+                    logger.info(
+                        f"Housekeeping complete: {cleaned_files} temp files removed, "
+                        f"{evicted_ram} RAM cache items evicted, "
+                        f"{cleaned_db} expired DB rows purged, {collected} cyclic GC objects collected."
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Error during periodic housekeeping: {e}")
+
+    housekeeping_task = asyncio.create_task(_housekeeping_loop())
+
+    # 5. Launch polling as background task inside event loop
     logger.info("Starting Telegram bot polling loop...")
     await bot.delete_webhook(drop_pending_updates=False)
     polling_task = asyncio.create_task(
@@ -80,8 +110,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # 5. Graceful Shutdown
+    # 6. Graceful Shutdown
     logger.info("Shutting down background tasks and connection pools...")
+    housekeeping_task.cancel()
+    try:
+        await housekeeping_task
+    except (asyncio.CancelledError, Exception):
+        pass
     try:
         await dp.stop_polling()
     except Exception:

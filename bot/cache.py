@@ -78,6 +78,14 @@ class TwoTierCache:
             except Exception as e:
                 logger.warning(f"Error deleting cache key {key} from DB: {e}")
 
+    def expire_ram(self) -> int:
+        """Explicitly purge expired entries from the in-memory cache to release RAM."""
+        if not self.enabled:
+            return 0
+        before = len(self._ram_cache)
+        self._ram_cache.expire()
+        return before - len(self._ram_cache)
+
     def clear_ram(self) -> None:
         """Clear the in-memory cache."""
         self._ram_cache.clear()

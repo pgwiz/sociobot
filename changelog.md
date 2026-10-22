@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stream Extractor API Video Validation & Upgrade:**
   - Added stream URL inspection to detect audio-only streams (e.g. `_audio.m3u8`) and automatically request `quality="best"` before streaming.
   - Added automatic fallback to `quality="best"` when `has_video_stream()` detects a non-video stream on restrictive quality presets.
+- **Memory & Resource Leak Prevention:**
+  - Replaced in-memory pre-packaged MP3 response buffering (`resp.content`) with constant-memory chunk streaming (`resp.aiter_bytes(chunk_size=65536)`), dropping memory allocation per audio download from ~50MB to <1MB.
+  - Added `del info` after extracting metadata in `_download_via_ytdlp` to immediately release yt-dlp's massive extracted format/metadata dictionary from RAM.
+  - Added `Downloader.cleanup_task_artifacts()` to purge all intermediate download fragments (`.part`, `.ytdl`, `.frag`, `.temp`) immediately upon completion or failure.
+  - Added `TwoTierCache.expire_ram()` to actively purge expired entries from the in-memory `TTLCache`.
+  - Added automated background housekeeping task in `lifespan` running every 30 minutes to purge orphaned files, evict expired RAM cache, purge expired DB cache rows, and trigger cyclic garbage collection (`gc.collect()`).
 
 ### Added
 - **Pinterest Platform Integration:**

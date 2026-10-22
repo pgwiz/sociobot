@@ -46,6 +46,8 @@
    - WSGI Fallback: `wsgi.py` and `your_application/wsgi.py` wrap the FastAPI app in `a2wsgi.ASGIMiddleware(app)` for legacy Gunicorn environments.
    - Aiogram polling runs as a background task within FastAPI lifespan with `/` and `/health` HTTP endpoints responding for Render health checks.
    - Lifecycle: Lifespan manager triggers `dp.stop_polling()` followed by bot session, API client, and DB pool termination for 100% clean shutdown on container restarts without orphaned connections or unclosed session warnings.
+   - Automated Housekeeping Loop: A background task in `lifespan` runs every 30 minutes, actively purging orphaned temp download files older than 30m, evicting expired in-memory `TTLCache` entries (`cache.expire_ram()`), clearing expired database cache rows (`cleanup_expired_cache`), and triggering cyclic garbage collection (`gc.collect()`) to prevent memory/disk bloat on low-memory cloud instances (e.g. Render 512MB RAM).
+   - Constant-Memory Streaming: Downloader streams files to disk in 64KB chunks (`aiter_bytes`) rather than buffering payloads in RAM (`resp.content`), keeping active download RAM usage minimal.
    - Config template: `.env.example` provides copy-pasteable environment variables for cloud deployments.
 
 ## Decentralized Storage & Multi-Node Schema
