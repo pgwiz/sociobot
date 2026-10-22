@@ -176,6 +176,16 @@ class Downloader:
 
         # 2. Stream proxy from /stream/:videoId or /get
         meta = await api_client.get_stream_info(identifier, quality=quality)
+        if meta and is_video:
+            # If video was requested, but API streamUrl points to an audio-only stream (e.g. _audio.m3u8),
+            # or if quality preset is restrictive, upgrade to quality="best"
+            stream_url = meta.get("streamUrl") or ""
+            if ("_audio." in stream_url or "audio_only" in stream_url) and quality not in ("best", "720p"):
+                logger.info(f"API stream for {identifier} selected audio-only stream ({stream_url}). Retrying API with quality='best'...")
+                best_meta = await api_client.get_stream_info(identifier, quality="best")
+                if best_meta and best_meta.get("streamUrl") and "_audio." not in (best_meta.get("streamUrl") or ""):
+                    meta = best_meta
+                    quality = "best"
         if meta:
             proxy_url = meta.get("proxy_url")
             stream_url = meta.get("streamUrl")
@@ -227,9 +237,15 @@ class Downloader:
                             if not await has_video_stream(final_video_path):
                                 logger.warning(
                                     f"API stream for {identifier} (quality: {quality}) "
-                                    f"does not contain a valid video stream! Discarding for fallback."
+                                    f"does not contain a valid video stream!"
                                 )
                                 self.cleanup_files(final_video_path, thumb_path)
+                                # If we haven't tried quality='best' yet, retry with quality='best' before giving up to yt-dlp
+                                if quality not in ("best", "720p"):
+                                    logger.info(f"Retrying API stream for {identifier} with quality='best'...")
+                                    best_res = await self._download_via_api(identifier, quality="best")
+                                    if best_res[0]:
+                                        return best_res
                                 return None, None, {}
 
                             metadata = {
@@ -328,11 +344,24 @@ class Downloader:
         outtmpl = str(self.download_dir / f"{task_id}.%(ext)s")
 
         if quality == "saver":
-            fmt = "b[height<=480]/b[height<=360]/worst[ext=mp4]/worst"
+            fmt = (
+                "bestvideo[height<=480]+bestaudio/best[height<=480]/"
+                "bestvideo[height<=360]+bestaudio/best[height<=360]/"
+                "bestvideo+bestaudio/bestvideo/best"
+            )
         elif quality == "360p":
-            fmt = "bestvideo[height<=360]+bestaudio/best[height<=360]/best"
+            fmt = (
+                "bestvideo[height<=360]+bestaudio/best[height<=360]/"
+                "bestvideo[height<=480]+bestaudio/best[height<=480]/"
+                "bestvideo[height<=720]+bestaudio/best[height<=720]/"
+                "bestvideo+bestaudio/bestvideo/best"
+            )
         elif is_video:
-            fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]"
+            fmt = (
+                "bestvideo[height<=720]+bestaudio/best[height<=720]/"
+                "bestvideo[height<=1080]+bestaudio/best[height<=1080]/"
+                "bestvideo+bestaudio/bestvideo/best"
+            )
         else:
             fmt = "bestaudio/best"
 
@@ -343,6 +372,9 @@ class Downloader:
             "no_warnings": True,
             "writethumbnail": True,
         }
+
+        if is_video:
+            ydl_opts["merge_output_format"] = "mp4"
 
         if not is_video and shutil.which("ffmpeg"):
             ydl_opts["postprocessors"] = [{
@@ -364,8 +396,16 @@ class Downloader:
         if not info:
             return None, None, {}
 
-        ext = "mp4" if is_video else ("mp3" if shutil.which("ffmpeg") else info.get("ext", "m4a"))
-        file_path = str(self.download_dir / f"{task_id}.{ext}")
+        # Locate the downloaded file (checking task_id prefix)
+        file_path = None
+        for f in self.download_dir.glob(f"{task_id}.*"):
+            if f.suffix.lower() not in (".jpg", ".webp", ".png", ".jpeg"):
+                file_path = str(f)
+                break
+
+        if not file_path:
+            ext = "mp4" if is_video else ("mp3" if shutil.which("ffmpeg") else info.get("ext", "m4a"))
+            file_path = str(self.download_dir / f"{task_id}.{ext}")
 
         thumb_path = None
         for cand_ext in ("jpg", "webp", "png"):

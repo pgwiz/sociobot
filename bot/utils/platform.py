@@ -4,7 +4,7 @@ import re
 from urllib.parse import urlparse
 from typing import Optional, Tuple, Dict
 
-SOCIAL_VIDEO_PLATFORMS = {"tiktok", "instagram", "twitter", "reddit"}
+SOCIAL_VIDEO_PLATFORMS = {"tiktok", "instagram", "twitter", "reddit", "pinterest"}
 MUSIC_PLATFORMS        = {"spotify", "soundcloud", "bandcamp"}
 VIDEO_PLATFORMS        = {"youtube", "vimeo"}
 
@@ -23,6 +23,7 @@ SUPPORTED_PLATFORMS = [
     ("reddit", "Reddit", "🤖"),
     ("soundcloud", "SoundCloud", "☁️"),
     ("bandcamp", "Bandcamp", "⛺"),
+    ("pinterest", "Pinterest", "📌"),
     ("vimeo", "Vimeo", "🎞️"),
     ("other", "Other Links", "🌐"),
 ]
@@ -64,6 +65,8 @@ def detect_platform_and_url(text: str) -> Tuple[Optional[str], Optional[str]]:
         return "soundcloud", url
     if host in ("bandcamp.com",) or host.endswith(".bandcamp.com"):
         return "bandcamp", url
+    if host in ("pinterest.com", "pin.it") or host.endswith((".pinterest.com", ".pin.it")):
+        return "pinterest", url
     if host in ("vimeo.com",) or host.endswith(".vimeo.com"):
         return "vimeo", url
 

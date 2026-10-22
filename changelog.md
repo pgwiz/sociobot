@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-10-22
+
+### Fixed
+- **Pinterest & Multi-Platform Adaptive Video Streams:**
+  - Resolved `Requested format is not available` error on Pinterest, Reddit, Twitter, and TikTok when fallback to `yt-dlp` was triggered.
+  - Upgraded format selector to multi-tier cascades: `bestvideo[height<=360]+bestaudio/best[height<=360]/bestvideo[height<=480]+bestaudio/.../bestvideo+bestaudio/bestvideo/best`.
+  - Added automatic `merge_output_format: "mp4"` in `yt-dlp` to ensure merged audio/video streams always output standard MP4 format.
+  - Added robust file location scanning in downloader for merged container formats.
+- **Stream Extractor API Video Validation & Upgrade:**
+  - Added stream URL inspection to detect audio-only streams (e.g. `_audio.m3u8`) and automatically request `quality="best"` before streaming.
+  - Added automatic fallback to `quality="best"` when `has_video_stream()` detects a non-video stream on restrictive quality presets.
+
+### Added
+- **Pinterest Platform Integration:**
+  - Added `pinterest` (`pinterest.com`, `pin.it`) to `SUPPORTED_PLATFORMS` with icon `📌`.
+  - Configured Pinterest as a social video platform with automatic "[ 🎵 Extract Audio ]" button attachment and channel routing support.
+
 ## [2.1.0] - 2026-10-17
 
 ### Added

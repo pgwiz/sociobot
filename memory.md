@@ -60,12 +60,13 @@
    - 3-step media purge: `cb:mych_delmedia_1` -> `cb:mych_delmedia_2` -> `cb:mych_delmedia_3` -> `cb:mych_delmedia_confirm` permanently deletes channel posts from Telegram (`bot.delete_message`) and clears database records (`user_media_storage`).
 
 2. **Multi-Platform Extraction & Platform Routing:**
-   - Supports 9 platforms: YouTube, Spotify, TikTok, Instagram, Twitter/X, Reddit, SoundCloud, Bandcamp, Vimeo.
-   - `bot.utils.platform`: Strict domain-delimited regex pattern detector avoiding false positives (e.g., `reddit.com` vs `t.co`).
+   - Supports 10 platforms: YouTube, Spotify, TikTok, Instagram, Twitter/X, Reddit, Pinterest, SoundCloud, Bandcamp, Vimeo.
+   - `bot.utils.platform`: Strict domain-delimited regex pattern detector avoiding false positives (e.g., `pin.it` / `pinterest.com`).
    - Quality presets:
-     - Social videos (`tiktok`, `instagram`, `twitter`, `reddit`): Download in lowest quality (`saver` MP4) to preserve bandwidth, with an attached `[ 🎵 Extract Audio ]` button.
+     - Social videos (`tiktok`, `instagram`, `twitter`, `reddit`, `pinterest`): Download in lowest quality (`saver` / `360p` MP4) to preserve bandwidth, with an attached `[ 🎵 Extract Audio ]` button.
      - Music platforms (`spotify`, `soundcloud`, `bandcamp`): Default to ID3-tagged 320k MP3 (`audio_high`).
      - Videos (`youtube`, `vimeo`): Present format selector or default to user preference.
+   - Resilient Fallback Engine: Multi-tier fallback cascades for adaptive streams (e.g. HLS manifests on Pinterest) preventing `Requested format is not available` errors.
    - Dynamic Link Picker: If an unrouted link arrives for a user with >1 vaults, Sociobot displays an inline channel picker, saves the destination route, and downloads the media.
 
 3. **Multi-Node Database Tables:**
