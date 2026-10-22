@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.1.1] - 2026-10-22
 
 ### Fixed
+- **Subprocess Lifecycle & Zombie Process Prevention:**
+  - Hardened `has_video_stream()` in `bot/downloader.py`: wrapped `ffprobe` execution in `try...except (asyncio.TimeoutError, asyncio.CancelledError)` with explicit `proc.kill()` and `await proc.wait()` to eliminate zombie processes and descriptor leaks on probe timeouts or client cancellations.
+  - Hardened audio transcode in `_download_via_api`: added a 60-second execution timeout guard (`asyncio.wait_for(proc.wait(), timeout=60.0)`) with explicit subprocess termination and wait reaping on timeout or cancellation, preventing indefinite task/process hanging on corrupted media streams.
+- **Downloader Recursion Guard:**
+  - Added an explicit `is_retry: bool = False` parameter to `_download_via_api()`, strictly capping fallback retry depth to 1 and preventing any possibility of repetitive recursive download attempts under unusual quality presets.
 - **Pinterest & Multi-Platform Adaptive Video Streams:**
   - Resolved `Requested format is not available` error on Pinterest, Reddit, Twitter, and TikTok when fallback to `yt-dlp` was triggered.
   - Upgraded format selector to multi-tier cascades: `bestvideo[height<=360]+bestaudio/best[height<=360]/bestvideo[height<=480]+bestaudio/.../bestvideo+bestaudio/bestvideo/best`.

@@ -57,6 +57,7 @@ async def has_video_stream(file_path: str) -> bool:
 
     ffprobe_bin = shutil.which("ffprobe")
     if ffprobe_bin:
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 ffprobe_bin,
@@ -73,7 +74,21 @@ async def has_video_stream(file_path: str) -> bool:
             if codec:
                 return True
             return False
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if proc:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            logger.warning(f"ffprobe validation timed out or cancelled for {file_path}")
         except Exception as e:
+            if proc:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
             logger.warning(f"ffprobe validation failed for {file_path}: {e}")
 
     # Fallback: Binary inspection of container for video tracks
@@ -131,7 +146,8 @@ class Downloader:
     async def _download_via_api(
         self,
         identifier: str,
-        quality: str
+        quality: str,
+        is_retry: bool = False
     ) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
         """Download track directly from stream extractor API with audio/video format integrity."""
         is_video = is_video_quality(quality)
@@ -253,10 +269,10 @@ class Downloader:
                                     f"does not contain a valid video stream!"
                                 )
                                 self.cleanup_files(final_video_path, thumb_path)
-                                # If we haven't tried quality='best' yet, retry with quality='best' before giving up to yt-dlp
-                                if quality not in ("best", "720p"):
+                                # If we haven't retried yet and tried quality wasn't 'best', retry once with quality='best'
+                                if not is_retry and quality not in ("best", "720p"):
                                     logger.info(f"Retrying API stream for {identifier} with quality='best'...")
-                                    best_res = await self._download_via_api(identifier, quality="best")
+                                    best_res = await self._download_via_api(identifier, quality="best", is_retry=True)
                                     if best_res[0]:
                                         return best_res
                                 return None, None, {}
@@ -292,14 +308,33 @@ class Downloader:
 
                             if shutil.which("ffmpeg"):
                                 logger.info(f"Transcoding stream to pure MP3 ({bitrate}) using ffmpeg...")
-                                proc = await asyncio.create_subprocess_exec(
-                                    "ffmpeg", "-y", "-i", temp_raw_path,
-                                    "-vn", "-c:a", "libmp3lame", "-b:a", bitrate,
-                                    final_audio_path,
-                                    stdout=asyncio.subprocess.DEVNULL,
-                                    stderr=asyncio.subprocess.DEVNULL
-                                )
-                                await proc.wait()
+                                proc = None
+                                try:
+                                    proc = await asyncio.create_subprocess_exec(
+                                        "ffmpeg", "-y", "-i", temp_raw_path,
+                                        "-vn", "-c:a", "libmp3lame", "-b:a", bitrate,
+                                        final_audio_path,
+                                        stdout=asyncio.subprocess.DEVNULL,
+                                        stderr=asyncio.subprocess.DEVNULL
+                                    )
+                                    await asyncio.wait_for(proc.wait(), timeout=60.0)
+                                except (asyncio.TimeoutError, asyncio.CancelledError):
+                                    if proc:
+                                        try:
+                                            proc.kill()
+                                            await proc.wait()
+                                        except Exception:
+                                            pass
+                                    logger.warning(f"ffmpeg transcode timed out or cancelled for {temp_raw_path}")
+                                except Exception as e:
+                                    if proc:
+                                        try:
+                                            proc.kill()
+                                            await proc.wait()
+                                        except Exception:
+                                            pass
+                                    logger.warning(f"ffmpeg transcode failed: {e}")
+
                                 if os.path.exists(temp_raw_path):
                                     try:
                                         os.remove(temp_raw_path)

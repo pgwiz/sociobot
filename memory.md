@@ -48,6 +48,8 @@
    - Lifecycle: Lifespan manager triggers `dp.stop_polling()` followed by bot session, API client, and DB pool termination for 100% clean shutdown on container restarts without orphaned connections or unclosed session warnings.
    - Automated Housekeeping Loop: A background task in `lifespan` runs every 30 minutes, actively purging orphaned temp download files older than 30m, evicting expired in-memory `TTLCache` entries (`cache.expire_ram()`), clearing expired database cache rows (`cleanup_expired_cache`), and triggering cyclic garbage collection (`gc.collect()`) to prevent memory/disk bloat on low-memory cloud instances (e.g. Render 512MB RAM).
    - Constant-Memory Streaming: Downloader streams files to disk in 64KB chunks (`aiter_bytes`) rather than buffering payloads in RAM (`resp.content`), keeping active download RAM usage minimal.
+   - Subprocess Lifecycle & Zombie Reaping: All `asyncio.create_subprocess_exec` invocations (`ffprobe` stream validation and `ffmpeg` transcoding) are bounded with strict timeouts and explicit cancellation/timeout handlers that invoke `proc.kill()` and `await proc.wait()`, completely eliminating zombie child processes and OS file descriptor leaks.
+   - Recursion Bounding: Download operations enforce an explicit `is_retry: bool = False` guard, capping recursive stream format upgrades to a maximum depth of 1.
    - Config template: `.env.example` provides copy-pasteable environment variables for cloud deployments.
 
 ## Decentralized Storage & Multi-Node Schema
